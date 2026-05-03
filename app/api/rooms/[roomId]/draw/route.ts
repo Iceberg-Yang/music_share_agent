@@ -24,7 +24,7 @@ export async function POST(
 
     const allTopics: string[] = JSON.parse(room.topics);
     const takenTopics = room.participants
-      .map((p) => p.drawnTopic)
+      .map((p: { drawnTopic: string | null }) => p.drawnTopic)
       .filter(Boolean) as string[];
     const available = allTopics.filter((t) => !takenTopics.includes(t));
 
