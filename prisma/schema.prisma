@@ -21,6 +21,13 @@ model Room {
   updatedAt    DateTime      @updatedAt
   expiresAt    DateTime
 
+  // V2 Agent 字段
+  agentPhase              String?  // Agent 工作流当前阶段
+  agentPersonalityProfiles String? // JSON：双人性格档案
+  agentRelationship       String?  // JSON：关系分析
+  agentNextSong           String?  // JSON：下一首推荐
+  agentExecutionLog       String?  // JSON：Agent 执行日志数组
+
   participants Participant[]
   entries      MusicEntry[]
 }

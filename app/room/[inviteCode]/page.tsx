@@ -21,6 +21,35 @@ interface Entry {
   reason?: string;
 }
 
+interface PersonalityProfile {
+  nickname: string;
+  participantId: string;
+  traits: string[];
+  musicStyle: string;
+}
+
+interface RelationshipAnalysis {
+  type: string;
+  tone: string;
+  sharedMoments: string[];
+}
+
+interface NextSongRecommendation {
+  songName: string;
+  artist: string;
+  reason: string;
+}
+
+interface ExecutionLogEntry {
+  node: string;
+  startAt: string;
+  endAt: string;
+  durationMs: number;
+  type: "llm" | "human" | "route";
+  summary: string;
+  thinking?: string;
+}
+
 interface RoomData {
   id: string;
   name: string;
@@ -31,9 +60,190 @@ interface RoomData {
   entries: Entry[];
   aiSummary?: string;
   aiTags?: string[];
+  // V2 Agent 字段
+  agentPhase?: string;
+  agentPersonalityProfiles?: PersonalityProfile[];
+  agentRelationship?: RelationshipAnalysis | null;
+  agentNextSong?: NextSongRecommendation | null;
+  agentExecutionLog?: ExecutionLogEntry[];
 }
 
 type Stage = "waiting" | "draw" | "submit" | "result";
+
+// ──────────────────────────────────────────────
+// 子组件：性格卡
+// ──────────────────────────────────────────────
+
+function PersonalityCards({
+  profiles,
+  relationship,
+  participants,
+}: {
+  profiles: PersonalityProfile[];
+  relationship?: RelationshipAnalysis | null;
+  participants: Participant[];
+}) {
+  if (!profiles || profiles.length === 0) return null;
+
+  // 将 profiles 和 participants 对应（按顺序）
+  const enrichedProfiles = profiles.map((p, i) => ({
+    ...p,
+    nickname: p.nickname || participants[i]?.nickname || `参与者${i + 1}`,
+  }));
+
+  return (
+    <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800 space-y-3">
+      <p className="text-xs text-gray-500 mb-1">🎭 你们这次的状态</p>
+      {enrichedProfiles.map((profile, i) => (
+        <div key={i} className="space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-medium text-white">{profile.nickname}</span>
+            {profile.traits.map((t) => (
+              <span
+                key={t}
+                className="text-xs text-indigo-300 bg-indigo-400/10 px-2 py-0.5 rounded-full"
+              >
+                {t}
+              </span>
+            ))}
+          </div>
+          {profile.musicStyle && (
+            <p className="text-xs text-gray-500 ml-0.5">{profile.musicStyle}</p>
+          )}
+        </div>
+      ))}
+      {relationship && (
+        <div className="pt-2 border-t border-gray-800 space-y-1">
+          <p className="text-xs text-gray-400">
+            你们的关系：
+            <span className="text-gray-300">
+              {relationship.type}，{relationship.tone}
+            </span>
+          </p>
+          {relationship.sharedMoments?.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {relationship.sharedMoments.map((m, i) => (
+                <span key={i} className="text-xs text-gray-500 italic">
+                  「{m}」
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────
+// 子组件：下一首推荐
+// ──────────────────────────────────────────────
+
+function NextSongCard({ rec }: { rec: NextSongRecommendation }) {
+  return (
+    <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+      <p className="text-xs text-gray-500 mb-3">🎵 如果还想听一首</p>
+      <div className="flex items-start gap-3">
+        <div className="w-10 h-10 rounded-xl bg-indigo-600/30 flex items-center justify-center text-lg flex-shrink-0">
+          ♫
+        </div>
+        <div>
+          <p className="text-base font-bold text-white">《{rec.songName}》</p>
+          <p className="text-sm text-gray-400">{rec.artist}</p>
+          {rec.reason && (
+            <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">{rec.reason}</p>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-gray-700 mt-3">* AI 推荐，请自行确认歌曲是否存在</p>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────
+// 子组件：Agent 执行日志
+// ──────────────────────────────────────────────
+
+const NODE_LABELS: Record<string, string> = {
+  hostChatNode: "主持人对话",
+  analyzeChatNode: "聊天深度分析",
+  generateTopicsNode: "主题生成",
+  waitForDrawNode: "抽签",
+  waitForEntriesNode: "提交音乐",
+  generateSummaryNode: "总结与推荐",
+};
+
+function AgentExecutionLog({ logs }: { logs: ExecutionLogEntry[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+
+  if (!logs || logs.length === 0) return null;
+
+  return (
+    <div className="bg-gray-900 rounded-2xl border border-gray-800 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-5 py-4 flex items-center justify-between text-left"
+      >
+        <span className="text-sm text-gray-400">查看 AI 的工作过程</span>
+        <span className="text-gray-600 text-xs">{expanded ? "收起 ▲" : "展开 ▼"}</span>
+      </button>
+
+      {expanded && (
+        <div className="px-5 pb-5 space-y-2 border-t border-gray-800 pt-4">
+          {logs.map((log, i) => (
+            <div key={i} className="space-y-1">
+              <div className="flex items-start gap-2">
+                <span
+                  className={`mt-0.5 text-xs flex-shrink-0 ${
+                    log.type === "llm"
+                      ? "text-indigo-400"
+                      : log.type === "human"
+                      ? "text-green-400"
+                      : "text-gray-500"
+                  }`}
+                >
+                  {log.type === "human" ? "👤" : log.type === "llm" ? "🤖" : "→"}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-medium text-gray-300">
+                      {NODE_LABELS[log.node] || log.node}
+                    </span>
+                    {log.durationMs > 0 && (
+                      <span className="text-xs text-gray-600">
+                        {(log.durationMs / 1000).toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{log.summary}</p>
+                  {log.thinking && (
+                    <button
+                      onClick={() => setExpandedIdx(expandedIdx === i ? null : i)}
+                      className="text-xs text-indigo-500 hover:text-indigo-400 mt-1"
+                    >
+                      {expandedIdx === i ? "收起推理过程" : "查看原始输出"}
+                    </button>
+                  )}
+                  {expandedIdx === i && log.thinking && (
+                    <pre className="mt-1 text-xs text-gray-600 bg-gray-800/50 rounded-lg p-2 overflow-auto max-h-40 whitespace-pre-wrap">
+                      {log.thinking.slice(0, 500)}
+                      {log.thinking.length > 500 ? "..." : ""}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────
+// 主页面
+// ──────────────────────────────────────────────
 
 export default function RoomPage() {
   const { inviteCode } = useParams<{ inviteCode: string }>();
@@ -47,19 +257,14 @@ export default function RoomPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // 提交音乐表单
   const [songName, setSongName] = useState("");
   const [artist, setArtist] = useState("");
   const [musicUrl, setMusicUrl] = useState("");
   const [reason, setReason] = useState("");
   const [submitError, setSubmitError] = useState("");
 
-  // 抽签动效
   const [drawing, setDrawing] = useState(false);
   const [drawnTopic, setDrawnTopic] = useState<string | null>(null);
-
-  // 总结生成
-  const [summaryLoading, setSummaryLoading] = useState(false);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -76,7 +281,6 @@ export default function RoomPage() {
         const participant = data.participants.find((p) => p.id === session.participantId);
         if (participant) {
           setMe(participant);
-          // 根据状态决定 stage
           if (data.status === "completed" || data.aiSummary) {
             setStage("result");
           } else if (participant.hasEntry) {
@@ -91,44 +295,24 @@ export default function RoomPage() {
           }
         }
       } else {
-        // 无 session，说明是第三方查看或链接分享
         if (data.status === "completed" || data.aiSummary) {
           setStage("result");
         } else if (data.participants.length < 2) {
-          // 引导去加入
           router.push(`/join/${inviteCode}`);
           return;
         }
       }
     } catch {
-      // 网络错误静默处理
+      // 静默处理
     } finally {
       setLoading(false);
     }
   }, [inviteCode, router]);
 
-  // 检查是否需要自动生成总结
-  const checkAndGenerateSummary = useCallback(async (r: RoomData) => {
-    if (r.status === "submitted" && !r.aiSummary && !summaryLoading) {
-      setSummaryLoading(true);
-      try {
-        const res = await fetch(`/api/rooms/${r.id}/summary`, { method: "POST" });
-        if (res.ok) {
-          await fetchRoom();
-          setStage("result");
-        }
-      } finally {
-        setSummaryLoading(false);
-      }
-    }
-    if (r.status === "completed") setStage("result");
-  }, [fetchRoom, summaryLoading]);
-
   useEffect(() => {
     fetchRoom();
   }, [fetchRoom]);
 
-  // 轮询
   useEffect(() => {
     if (stage === "waiting" || stage === "draw" || (stage === "submit" && room?.status !== "completed")) {
       pollRef.current = setInterval(async () => {
@@ -144,13 +328,12 @@ export default function RoomPage() {
           if (participant) setMe(participant);
         }
 
-        if (data.status === "submitted") checkAndGenerateSummary(data);
         if (data.status === "completed") { setStage("result"); clearInterval(pollRef.current!); }
         if (stage === "waiting" && data.participants.length >= 2) setStage("draw");
       }, 3000);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [stage, inviteCode, checkAndGenerateSummary, room]);
+  }, [stage, inviteCode, room]);
 
   async function handleDraw() {
     if (!me || !room) return;
@@ -244,6 +427,7 @@ export default function RoomPage() {
   const otherParticipant = participants.find((p) => p.id !== me?.id);
   const myEntry = entries.find((e) => e.participantId === me?.id);
   const otherEntry = entries.find((e) => e.participantId !== me?.id);
+  void otherParticipant; void myEntry; void otherEntry;
 
   return (
     <main className="min-h-screen flex flex-col items-center px-4 py-10">
@@ -444,10 +628,9 @@ export default function RoomPage() {
             {/* AI 总结 */}
             {entries.length >= 2 && (
               <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
-                {summaryLoading && (
+                {!room.aiSummary ? (
                   <p className="text-gray-500 text-sm text-center animate-pulse">AI 正在感受这场音乐局...</p>
-                )}
-                {room.aiSummary && (
+                ) : (
                   <div>
                     <p className="text-xs text-gray-600 mb-2">AI 总结</p>
                     <p className="text-gray-300 text-sm leading-relaxed">{room.aiSummary}</p>
@@ -462,21 +645,31 @@ export default function RoomPage() {
                     )}
                   </div>
                 )}
-                {!summaryLoading && !room.aiSummary && room.status === "submitted" && (
-                  <button
-                    onClick={async () => {
-                      setSummaryLoading(true);
-                      const res = await fetch(`/api/rooms/${room.id}/summary`, { method: "POST" });
-                      if (res.ok) await fetchRoom();
-                      setSummaryLoading(false);
-                    }}
-                    className="w-full text-sm text-gray-400 hover:text-white transition"
-                  >
-                    生成 AI 总结
-                  </button>
-                )}
               </div>
             )}
+
+            {/* 性格卡（V2） */}
+            {entries.length >= 2 &&
+              room.agentPersonalityProfiles &&
+              room.agentPersonalityProfiles.length > 0 && (
+                <PersonalityCards
+                  profiles={room.agentPersonalityProfiles}
+                  relationship={room.agentRelationship}
+                  participants={participants}
+                />
+              )}
+
+            {/* 下一首推荐（V2） */}
+            {entries.length >= 2 && room.agentNextSong && (
+              <NextSongCard rec={room.agentNextSong} />
+            )}
+
+            {/* Agent 执行日志（V2） */}
+            {entries.length >= 2 &&
+              room.agentExecutionLog &&
+              room.agentExecutionLog.length > 0 && (
+                <AgentExecutionLog logs={room.agentExecutionLog} />
+              )}
 
             {/* 分享 */}
             <div className="flex gap-3">

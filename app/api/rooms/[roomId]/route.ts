@@ -38,6 +38,20 @@ export async function GET(
       topics: JSON.parse(room.topics),
       aiSummary: room.aiSummary,
       aiTags: room.aiTags ? JSON.parse(room.aiTags) : [],
+      // V2 Agent 字段
+      agentPhase: room.agentPhase,
+      agentPersonalityProfiles: room.agentPersonalityProfiles
+        ? JSON.parse(room.agentPersonalityProfiles)
+        : [],
+      agentRelationship: room.agentRelationship
+        ? JSON.parse(room.agentRelationship)
+        : null,
+      agentNextSong: room.agentNextSong
+        ? JSON.parse(room.agentNextSong)
+        : null,
+      agentExecutionLog: room.agentExecutionLog
+        ? JSON.parse(room.agentExecutionLog)
+        : [],
       participants: room.participants.map((p) => ({
         id: p.id,
         nickname: p.nickname,

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { runSummaryGraph } from "@/lib/agent/graph";
+import type { ExecutionLogEntry } from "@/lib/agent/state";
 
 type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
@@ -34,11 +36,9 @@ export async function POST(
       return NextResponse.json({ error: "主题已用完" }, { status: 400 });
     }
 
-    // 事务保证并发安全
     const drawnTopic = available[Math.floor(Math.random() * available.length)];
 
     const updated = await prisma.$transaction(async (tx: Tx) => {
-      // 再次检查该主题是否已被抢占
       const freshParticipants = await tx.participant.findMany({ where: { roomId } });
       const freshTaken = freshParticipants
         .map((p: { drawnTopic: string | null }) => p.drawnTopic)
@@ -60,11 +60,33 @@ export async function POST(
       });
     });
 
-    // 检查是否两人都抽签了
+    // 检查是否两人都抽签了，更新 agentPhase
     const allParticipants = await prisma.participant.findMany({ where: { roomId } });
     const allDrawn = allParticipants.every((p) => p.drawnTopic);
+
     if (allDrawn) {
-      await prisma.room.update({ where: { id: roomId }, data: { status: "drawing" } });
+      // 追加 human 日志
+      const existingLog: ExecutionLogEntry[] = room.agentExecutionLog
+        ? JSON.parse(room.agentExecutionLog)
+        : [];
+
+      const drawLog: ExecutionLogEntry[] = allParticipants.map((p) => ({
+        node: "waitForDrawNode",
+        startAt: new Date().toISOString(),
+        endAt: new Date().toISOString(),
+        durationMs: 0,
+        type: "human" as const,
+        summary: `${p.nickname} 抽到主题「${p.drawnTopic}」`,
+      }));
+
+      await prisma.room.update({
+        where: { id: roomId },
+        data: {
+          status: "drawing",
+          agentPhase: "collecting",
+          agentExecutionLog: JSON.stringify([...existingLog, ...drawLog]),
+        },
+      });
     }
 
     return NextResponse.json({ topic: updated.drawnTopic });
