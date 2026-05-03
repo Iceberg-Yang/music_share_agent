@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Room {
+  id           String        @id @default(cuid())
+  name         String
+  inviteCode   String        @unique
+  status       String        @default("waiting") // waiting | ready | drawing | submitted | completed | expired
+  topicSource  String        @default("default")  // default | ai
+  topics       String        // JSON array string
+  chatMood     String?
+  chatKeywords String?       // JSON array string
+  aiSummary    String?
+  aiTags       String?       // JSON array string
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  expiresAt    DateTime
+
+  participants Participant[]
+  entries      MusicEntry[]
+}
+
+model Participant {
+  id           String      @id @default(cuid())
+  roomId       String
+  nickname     String
+  sessionToken String      @unique @default(cuid())
+  drawnTopic   String?
+  joinedAt     DateTime    @default(now())
+
+  room         Room        @relation(fields: [roomId], references: [id])
+  entry        MusicEntry?
+}
+
+model MusicEntry {
+  id            String      @id @default(cuid())
+  roomId        String
+  participantId String      @unique
+  topic         String
+  songName      String
+  artist        String
+  musicUrl      String?
+  reason        String?
+  createdAt     DateTime    @default(now())
+
+  room          Room        @relation(fields: [roomId], references: [id])
+  participant   Participant @relation(fields: [participantId], references: [id])
+}
