@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { PrismaClient } from "@prisma/client";
+
+type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
 
 export async function POST(
   req: NextRequest,
@@ -35,10 +38,12 @@ export async function POST(
     // 事务保证并发安全
     const drawnTopic = available[Math.floor(Math.random() * available.length)];
 
-    const updated = await prisma.$transaction(async (tx) => {
+    const updated = await prisma.$transaction(async (tx: Tx) => {
       // 再次检查该主题是否已被抢占
       const freshParticipants = await tx.participant.findMany({ where: { roomId } });
-      const freshTaken = freshParticipants.map((p) => p.drawnTopic).filter(Boolean) as string[];
+      const freshTaken = freshParticipants
+        .map((p: { drawnTopic: string | null }) => p.drawnTopic)
+        .filter(Boolean) as string[];
       const freshAvailable = allTopics.filter((t) => !freshTaken.includes(t));
 
       if (!freshAvailable.includes(drawnTopic)) {
