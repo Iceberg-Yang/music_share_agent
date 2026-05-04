@@ -160,6 +160,7 @@ function NextSongCard({ rec }: { rec: NextSongRecommendation }) {
             src={rec.coverUrl}
             alt={rec.songName}
             className="w-12 h-12 rounded-xl object-cover flex-shrink-0"
+            referrerPolicy="no-referrer"
             onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
           />
         ) : (
@@ -638,6 +639,7 @@ export default function RoomPage() {
                             src={song.cover}
                             alt={song.name}
                             className="w-9 h-9 rounded-lg object-cover flex-shrink-0"
+                            referrerPolicy="no-referrer"
                           />
                         )}
                         <div className="flex-1 min-w-0">
