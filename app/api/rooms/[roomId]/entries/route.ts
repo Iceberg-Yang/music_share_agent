@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { Command } from "@langchain/langgraph";
-import { getCompiledGraph } from "@/lib/agent/fullGraph";
-import type { ExecutionLogEntry, PersonalityProfile, ParticipantForSummary, NextSongRecommendation } from "@/lib/agent/state";
+import type { ExecutionLogEntry } from "@/lib/agent/state";
 
 export async function POST(
   req: NextRequest,
@@ -52,32 +50,7 @@ export async function POST(
     const allParticipants = await prisma.participant.findMany({ where: { roomId } });
 
     if (allEntries.length >= 2 && allParticipants.length === 2) {
-      const room = await prisma.room.findUnique({ where: { id: roomId } });
-      if (!room) return NextResponse.json({ error: "房间不存在" }, { status: 404 });
-
-      const personalityProfiles: PersonalityProfile[] = room.agentPersonalityProfiles
-        ? JSON.parse(room.agentPersonalityProfiles)
-        : [];
-
-      // 构建完整参与者数据（含歌曲 entry）
-      const participantsForGraph: ParticipantForSummary[] = allParticipants.map((p, idx) => {
-        const e = allEntries.find((en) => en.participantId === p.id);
-        const profile = personalityProfiles[idx];
-        return {
-          id: p.id,
-          nickname: p.nickname,
-          drawnTopic: p.drawnTopic || "",
-          traits: profile?.traits || [],
-          musicStyle: profile?.musicStyle || "",
-          entry: {
-            songName: e?.songName || "",
-            artist: e?.artist || "",
-            reason: e?.reason || undefined,
-          },
-        };
-      });
-
-      // 提交日志
+      // 追加提交日志
       const submitLogs: ExecutionLogEntry[] = allParticipants.map((p) => {
         const e = allEntries.find((en) => en.participantId === p.id);
         return {
@@ -90,58 +63,18 @@ export async function POST(
         };
       });
 
-      // ── 真正的 Human-in-the-loop：resume 到 generateSummaryNode ──
-      // thread_id = inviteCode，与创建时保持一致
-      let summaryResult: {
-        summary?: string;
-        tags?: string[];
-        nextSongRecommendation?: NextSongRecommendation;
-        executionLog?: ExecutionLogEntry[];
-      } = {};
-
-      try {
-        const graph = await getCompiledGraph();
-        // resume 图：传入完整参与者数据（含歌曲），图继续运行到 generateSummaryNode → END
-        summaryResult = await graph.invoke(
-          new Command({ resume: { participants: participantsForGraph } }),
-          { configurable: { thread_id: room.inviteCode } }
-        );
-      } catch (graphErr) {
-        console.error("[FullGraph] entries resume 失败:", graphErr);
-        // 降级：直接用 V2 方式调用总结（保留业务连续性）
-        const { runSummaryGraph } = await import("@/lib/agent/graph");
-        const fallbackResult = await runSummaryGraph({
-          roomName: room.name,
-          participants: participantsForGraph,
-          relationshipAnalysis: room.agentRelationship
-            ? JSON.parse(room.agentRelationship)
-            : undefined,
-        });
-        summaryResult = fallbackResult;
-      }
-
-      // 合并执行日志
-      const existingLog: ExecutionLogEntry[] = room.agentExecutionLog
+      const room = await prisma.room.findUnique({ where: { id: roomId } });
+      const existingLog: ExecutionLogEntry[] = room?.agentExecutionLog
         ? JSON.parse(room.agentExecutionLog)
         : [];
 
-      const newLog: ExecutionLogEntry[] = [
-        ...existingLog,
-        ...submitLogs,
-        ...(summaryResult.executionLog || []),
-      ];
-
+      // 只更新状态为 "submitted"，AI 总结由前端探测后调用 /summarize 触发
       await prisma.room.update({
         where: { id: roomId },
         data: {
-          status: "completed",
-          agentPhase: "done",
-          aiSummary: summaryResult.summary,
-          aiTags: summaryResult.tags ? JSON.stringify(summaryResult.tags) : null,
-          agentNextSong: summaryResult.nextSongRecommendation
-            ? JSON.stringify(summaryResult.nextSongRecommendation)
-            : null,
-          agentExecutionLog: JSON.stringify(newLog.slice(-20)),
+          status: "submitted",
+          agentPhase: "submitted",
+          agentExecutionLog: JSON.stringify([...existingLog, ...submitLogs].slice(-20)),
         },
       });
     }

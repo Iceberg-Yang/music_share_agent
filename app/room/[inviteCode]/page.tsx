@@ -402,6 +402,8 @@ export default function RoomPage() {
     fetchRoom();
   }, [fetchRoom]);
 
+  const summarizeCalledRef = useRef(false);
+
   useEffect(() => {
     if (stage === "waiting" || stage === "draw" || (stage === "submit" && room?.status !== "completed")) {
       pollRef.current = setInterval(async () => {
@@ -419,6 +421,15 @@ export default function RoomPage() {
 
         if (data.status === "completed") { setStage("result"); clearInterval(pollRef.current!); }
         if (stage === "waiting" && data.participants.length >= 2) setStage("draw");
+
+        // 双方都提交后触发 AI 总结（只触发一次）
+        if (
+          (data.status === "submitted" || (data.entries ?? []).length >= 2) &&
+          !summarizeCalledRef.current
+        ) {
+          summarizeCalledRef.current = true;
+          fetch(`/api/rooms/${data.id}/summarize`, { method: "POST" }).catch(() => {});
+        }
       }, 3000);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
@@ -477,6 +488,19 @@ export default function RoomPage() {
 
       await fetchRoom();
       setStage("result");
+
+      // 提交后立即检查是否双方都完成，触发总结
+      const checkRes = await fetch(`/api/rooms/${room.id}`);
+      if (checkRes.ok) {
+        const latest: RoomData = await checkRes.json();
+        if (
+          (latest.status === "submitted" || (latest.entries ?? []).length >= 2) &&
+          !summarizeCalledRef.current
+        ) {
+          summarizeCalledRef.current = true;
+          fetch(`/api/rooms/${room.id}/summarize`, { method: "POST" }).catch(() => {});
+        }
+      }
     } catch {
       setSubmitError("提交失败，请重试");
     } finally {
@@ -759,7 +783,7 @@ export default function RoomPage() {
         {/* 结果阶段 */}
         {stage === "result" && (
           <div className="space-y-4">
-            <p className="text-center text-gray-400 text-sm">这是你们今天抽到的两首歌。</p>
+            <p className="text-center text-gray-400 text-sm">这是你们今天选的两首歌。</p>
 
             {/* 两人结果卡片 */}
             {entries.length < 2 ? (
@@ -771,6 +795,8 @@ export default function RoomPage() {
                 {entries.map((entry) => {
                   const p = participants.find((p) => p.id === entry.participantId);
                   const isMe = p?.id === me?.id;
+                  // 对方的主题猜测结果出来前隐藏
+                  const showTopic = isMe || guessResult !== null;
                   return (
                     <div key={entry.id} className={`rounded-2xl p-5 border ${isMe ? "bg-indigo-950/40 border-indigo-800" : "bg-gray-900 border-gray-800"}`}>
                       <div className="flex items-center gap-2 mb-3">
@@ -782,7 +808,11 @@ export default function RoomPage() {
                       </div>
                       <div className="mb-2">
                         <span className="text-xs text-gray-500">主题 </span>
-                        <span className="text-indigo-300 font-semibold">「{entry.topic}」</span>
+                        {showTopic ? (
+                          <span className="text-indigo-300 font-semibold">「{entry.topic}」</span>
+                        ) : (
+                          <span className="text-gray-600 text-xs">猜对后揭晓 👇</span>
+                        )}
                       </div>
                       <div className="text-lg font-bold mb-0.5">
                         {entry.musicUrl ? (
