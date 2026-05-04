@@ -87,13 +87,25 @@ def _default_state() -> GuessState:
 # LLM
 # ──────────────────────────────────────────────
 
+def _resolve_api_key() -> str | None:
+    """Railway / 本地常见坑：变量名不一致、值带引号、首尾空格。"""
+    raw = (os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        raw = raw[1:-1].strip()
+    return raw or None
+
+
 def _get_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
-        api_key=os.getenv("LLM_API_KEY", ""),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
-        temperature=0.7,
-    )
+    kwargs: dict = {
+        "model": os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+        "base_url": os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
+        "temperature": 0.7,
+    }
+    key = _resolve_api_key()
+    if key:
+        kwargs["api_key"] = key
+    # 不传 api_key 时 ChatOpenAI 会读环境变量 OPENAI_API_KEY
+    return ChatOpenAI(**kwargs)
 
 
 # ──────────────────────────────────────────────
