@@ -1,67 +1,108 @@
 """
 网易云音乐 API 封装
-依赖 NeteaseCloudMusicApi（开源 Node.js 项目）作为代理层
-GitHub: https://github.com/Binaryify/NeteaseCloudMusicApi
+
+优先使用 pyncm（纯 Python SDK，直接对接网易云）。
+若 pyncm 未安装，自动回退到直接 HTTP 调用方式。
 """
 
-import os
-import httpx
 from typing import Optional
 
-# NeteaseCloudMusicApi 的部署地址，通过环境变量配置
-NETEASE_API_BASE = os.getenv(
-    "NETEASE_API_BASE",
-    "https://netease-cloud-music-api-five-tau.vercel.app",  # 公共 demo 实例（不稳定，建议自部署）
-)
+try:
+    import pyncm  # noqa: F401
+    _USE_PYNCM = True
+except ImportError:
+    _USE_PYNCM = False
 
-TIMEOUT = 12.0  # 秒
+if _USE_PYNCM:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from pyncm.apis import cloudsearch, track as pyncm_track
 
+    _executor = ThreadPoolExecutor(max_workers=4)
 
-async def search_songs(keyword: str, limit: int = 5) -> list[dict]:
-    """搜索歌曲，返回原始结果列表"""
-    async with httpx.AsyncClient() as client:
+    def _search_sync(keyword: str, limit: int) -> list[dict]:
         try:
-            resp = await client.get(
-                f"{NETEASE_API_BASE}/search",
-                params={"keywords": keyword, "limit": limit, "type": 1},
-                timeout=TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("result", {}).get("songs", [])
-        except (httpx.TimeoutException, httpx.HTTPError, KeyError, ValueError):
+            result = cloudsearch.GetSearchResult(keyword, limit=limit, type_=1)
+            songs = result.get("result", {}).get("songs", [])
+            return songs if isinstance(songs, list) else []
+        except Exception:
             return []
 
-
-async def get_song_detail(song_id: int) -> Optional[dict]:
-    """获取歌曲详情（含专辑封面）"""
-    async with httpx.AsyncClient() as client:
+    def _detail_sync(song_id: int) -> Optional[dict]:
         try:
-            resp = await client.get(
-                f"{NETEASE_API_BASE}/song/detail",
-                params={"ids": song_id},
-                timeout=TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            songs = data.get("songs", [])
+            result = pyncm_track.GetTrackDetail([song_id])
+            songs = result.get("songs", [])
             return songs[0] if songs else None
-        except (httpx.TimeoutException, httpx.HTTPError, KeyError, ValueError):
+        except Exception:
             return None
+
+    async def search_songs(keyword: str, limit: int = 5) -> list[dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_executor, _search_sync, keyword, limit)
+
+    async def get_song_detail(song_id: int) -> Optional[dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(_executor, _detail_sync, song_id)
+
+else:
+    # 回退：直接 HTTP（无需任何额外依赖）
+    import httpx
+
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://music.163.com",
+    }
+    _SEARCH_URL = "https://music.163.com/api/search/get"
+    _TIMEOUT = 10.0
+
+    async def search_songs(keyword: str, limit: int = 5) -> list[dict]:  # type: ignore[misc]
+        async with httpx.AsyncClient(headers=_HEADERS, follow_redirects=True) as client:
+            try:
+                resp = await client.get(
+                    _SEARCH_URL,
+                    params={"s": keyword, "type": 1, "offset": 0,
+                            "limit": limit, "total": "true"},
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                return resp.json().get("result", {}).get("songs") or []
+            except Exception:
+                return []
+
+    async def get_song_detail(song_id: int) -> Optional[dict]:  # type: ignore[misc]
+        async with httpx.AsyncClient(headers=_HEADERS) as client:
+            try:
+                resp = await client.get(
+                    "https://music.163.com/api/song/detail",
+                    params={"ids": f"[{song_id}]"},
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                songs = resp.json().get("songs", [])
+                return songs[0] if songs else None
+            except Exception:
+                return None
 
 
 def format_song(raw: dict) -> dict:
-    """把 NeteaseCloudMusicApi 返回的原始歌曲对象格式化为统一结构"""
+    """格式化歌曲，兼容 pyncm 和直接 HTTP 两种返回格式"""
     song_id = raw.get("id", 0)
 
-    # 歌手（可能有多个）
     artists = raw.get("artists") or raw.get("ar") or []
-    artist_name = "、".join(a.get("name", "") for a in artists) if artists else ""
+    artist_name = "、".join(a.get("name", "") for a in artists if a.get("name"))
 
-    # 专辑
     album = raw.get("album") or raw.get("al") or {}
     album_name = album.get("name", "")
-    cover_url = album.get("picUrl") or album.get("pic_str")
+
+    # 封面 URL（两种格式都尝试）
+    cover: Optional[str] = album.get("picUrl") or album.get("blurPicUrl")
+    if not cover:
+        pic_id = album.get("picId") or album.get("pic")
+        if pic_id:
+            cover = f"https://p1.music.126.net/{pic_id}/{pic_id}.jpg"
 
     return {
         "id": song_id,
@@ -70,5 +111,5 @@ def format_song(raw: dict) -> dict:
         "album": album_name,
         "duration": raw.get("duration") or raw.get("dt") or 0,
         "url": f"https://music.163.com/#/song?id={song_id}",
-        "cover": cover_url,
+        "cover": cover,
     }

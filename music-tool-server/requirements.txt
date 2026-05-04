@@ -4,3 +4,4 @@ httpx==0.28.1
 pydantic==2.10.3
 rapidfuzz==3.11.0
 python-dotenv==1.0.1
+pyncm @ git+https://github.com/mos9527/pyncm.git
