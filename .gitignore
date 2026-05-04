@@ -46,3 +46,9 @@ next-env.d.ts
 
 /app/generated/prisma
 app/.next
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.env

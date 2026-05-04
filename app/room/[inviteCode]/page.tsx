@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getSession, saveSession } from "@/lib/utils";
 import AgentThinkingLog from "@/components/AgentThinkingLog";
+import GuessChatWidget from "@/components/GuessChatWidget";
 
 interface Participant {
   id: string;
@@ -310,10 +311,8 @@ export default function RoomPage() {
   const [drawing, setDrawing] = useState(false);
   const [drawnTopic, setDrawnTopic] = useState<string | null>(null);
 
-  // V4：互猜状态
-  const [guessInput, setGuessInput] = useState("");
-  const [guessResult, setGuessResult] = useState<{ correct: boolean; answer: string } | null>(null);
-  const [guessLoading, setGuessLoading] = useState(false);
+  // V4：互猜（由 GuessChatWidget 内部管理状态，只保留揭晓标志用于控制主题显示）
+  const [guessRevealed, setGuessRevealed] = useState(false);
 
   // V4：AI 总结留言/评分
   const [reactionVote, setReactionVote] = useState<string | null>(null);
@@ -515,29 +514,9 @@ export default function RoomPage() {
     setTimeout(() => setCopied(false), 2000);
   }
 
-  // V4：互猜提交
-  async function handleGuess() {
-    if (!guessInput.trim() || !me || !room) return;
-    const session = getSession(room.id);
-    if (!session) return;
-    setGuessLoading(true);
-    try {
-      const res = await fetch(`/api/rooms/${room.id}/guess`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          participantId: me.id,
-          guess: guessInput.trim(),
-          sessionToken: session.sessionToken,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setGuessResult({ correct: data.guessCorrect, answer: data.answer });
-      }
-    } finally {
-      setGuessLoading(false);
-    }
+  // 当猜谜完成后揭晓对方主题的回调
+  function handleGuessComplete() {
+    setGuessRevealed(true);
   }
 
   // V4：留言/评分提交
@@ -796,7 +775,7 @@ export default function RoomPage() {
                   const p = participants.find((p) => p.id === entry.participantId);
                   const isMe = p?.id === me?.id;
                   // 对方的主题猜测结果出来前隐藏
-                  const showTopic = isMe || guessResult !== null;
+                  const showTopic = isMe || guessRevealed;
                   return (
                     <div key={entry.id} className={`rounded-2xl p-5 border ${isMe ? "bg-indigo-950/40 border-indigo-800" : "bg-gray-900 border-gray-800"}`}>
                       <div className="flex items-center gap-2 mb-3">
@@ -882,45 +861,21 @@ export default function RoomPage() {
             {/* V4：Agent 思考直播（实时轮询） */}
             <AgentThinkingLog roomId={inviteCode} phase={room.status} />
 
-            {/* V4：互猜环节 */}
-            {entries.length >= 2 && me && !guessResult && (
-              <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
-                <p className="text-sm text-gray-400 mb-1">猜一猜 🎯</p>
-                <p className="text-xs text-gray-600 mb-3">
-                  你知道对方抽到的是什么主题吗？
-                </p>
-                <div className="flex gap-2">
-                  <input
-                    className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition"
-                    placeholder="输入你的猜测…"
-                    value={guessInput}
-                    onChange={(e) => setGuessInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleGuess()}
-                    maxLength={20}
-                  />
-                  <button
-                    onClick={handleGuess}
-                    disabled={guessLoading || !guessInput.trim()}
-                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm font-medium transition"
-                  >
-                    {guessLoading ? "…" : "提交"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* V4：互猜结果 */}
-            {guessResult && (
-              <div className={`rounded-2xl p-5 border text-center ${guessResult.correct ? "bg-green-950/40 border-green-800" : "bg-gray-900 border-gray-700"}`}>
-                <div className="text-3xl mb-2">{guessResult.correct ? "🎉" : "😅"}</div>
-                <p className="font-semibold mb-1">
-                  {guessResult.correct ? "猜对了！" : "猜错了"}
-                </p>
-                <p className="text-sm text-gray-400">
-                  对方的主题是 <span className="text-indigo-300 font-medium">「{guessResult.answer}」</span>
-                </p>
-              </div>
-            )}
+            {/* V4：AI 引导猜谜（GuessChatGraph） */}
+            {entries.length >= 2 && me && room.status === "completed" && (() => {
+              const session = getSession(room.id);
+              const opponent = participants.find((p) => p.id !== me.id);
+              if (!session || !opponent) return null;
+              return (
+                <GuessChatWidget
+                  roomId={room.id}
+                  participantId={me.id}
+                  sessionToken={session.sessionToken}
+                  opponentNickname={opponent.nickname}
+                  onComplete={() => setGuessRevealed(true)}
+                />
+              );
+            })()}
 
             {/* V4：AI 总结留言 */}
             {entries.length >= 2 && room.aiSummary && !reactionSubmitted && (
