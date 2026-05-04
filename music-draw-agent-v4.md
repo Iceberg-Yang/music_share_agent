@@ -1,7 +1,7 @@
 # 双人音乐抽签 Agent V4 技术规划
 
-> 核心目标：让 Agent 从"一次性工具"升级为"认识你的陪伴者"。
-> 通过记忆系统、思考过程可视化、双人互动环节，让两个人在同一个 Agent 的见证下积累共同的音乐历史。
+> **核心目标**：让 Agent 从"一次性工具"升级为"认识你的陪伴者"。
+> 通过记忆系统、思考过程可视化、AI 引导猜谜、结果反馈，让两个人在同一个 Agent 的见证下积累共同的音乐历史。
 
 ---
 
@@ -9,643 +9,450 @@
 
 ### V3 已有
 
-- LangGraph 完整图（真正的 Human-in-the-loop + interrupt/resume）
+- LangGraph 完整游戏图（真正的 Human-in-the-loop + interrupt/resume）
 - Tool Use + ReAct（searchNeteaseTool 验证推荐歌曲）
 - PostgreSQL Checkpointer（跨 Serverless 状态持久化）
-- Python FastAPI 微服务（网易云搜索 + 模糊匹配）
+- Python FastAPI 微服务（网易云搜索 + rapidfuzz 模糊匹配）
 - 前端歌曲搜索联想框
 - Agent 执行日志（静态展示）
 
-### V3 存在的问题
+### V4 新增五项能力
 
-**问题 1：Agent 没有记忆**
-每次游戏结束，Agent 忘记所有上下文。第二次玩时，主持人还在问同样的问题，总结里没有任何历史感，像两个陌生人每次重新认识。
-
-**问题 2：两人缺乏共同的游戏体验**
-两人在各自手机上独立操作，等待结果时屏幕空白，没有"我们在一起等待"的仪式感。AI 的思考过程完全不可见。
-
-**问题 3：互动太线性**
-抽签 → 提交 → 看结果，中间没有任何双向互动环节。结果看完也就结束了，没有留下反馈的空间。
-
-### V4 新增四项能力
-
-| 能力 | 核心价值 | 技术实现 |
+| 能力 | 核心价值 | 技术方向 |
 |------|---------|---------|
-| A. 记忆系统 | Agent 认识你，积累你们的音乐历史 | UserMemory + PairMemory + LangGraph 新节点 |
-| B. Agent 思考直播 | 等待时两人共同观看 AI 思考过程 | 轮询 + 逐条展示执行日志 |
-| C. 互猜环节 | 抽签后增加一轮双人互动 | 新的游戏阶段 + 数据库字段 |
-| D. 结果页留言 | 对 AI 总结给出反应，留下印记 | Reaction 表 + 实时同步 |
+| A. 记忆系统 | Agent 认识你，积累音乐历史 | UserMemory + PairMemory + LangGraph 新节点 |
+| B. Agent 思考直播 | 等待时共同观看 AI 工作过程 | 轮询执行日志 + 逐条动画展示 |
+| C. AI 引导猜谜（本文重点） | 用独立 LangGraph 图实现多轮 AI 主持猜题 | 独立 GuessChatGraph + Python 语义裁判 |
+| D. 结果页留言 | 对 AI 总结给出反应，留下印记 | GameReaction 表 + 实时同步 |
+| E. 首页欢迎回来 | 有历史感的开场 | 读取 UserMemory 展示 |
 
 ---
 
-## 2. 整体架构变化
+## 2. 整体架构
+
+### 主游戏图（MainGameGraph）——已实现，V4 扩展
 
 ```
-V3 架构：
-  创建房间 → [interrupt] → 抽签 → [interrupt] → 提交 → 生成总结 → 结果
+loadMemoryNode（加载双方历史记忆）
+        ↓
+analyzeChatNode → generateTopicsNode
+        ↓
+[interrupt: waiting_for_draws]     ← 抽签
+        ↓
+[interrupt: waiting_for_entries]   ← 提交歌曲
+        ↓
+generateSummaryNode（注入记忆上下文）
+        ↓
+updateMemoryNode（后台异步写入记忆）
+        ↓
+       END
+```
 
-V4 架构：
-  ┌─────────────────────────────────────────────────────────┐
-  │ loadMemoryNode（加载双方历史记忆）← 新增               │
-  └────────────────────────┬────────────────────────────────┘
-                           ↓
-  analyzeChatNode → generateTopicsNode
-                           ↓
-           [interrupt: waiting_for_draws]
-                           ↓
-  ┌─────────────────────────────────────────────────────────┐
-  │ 互猜环节：猜对方主题 ← 新增                             │
-  └────────────────────────┬────────────────────────────────┘
-                           ↓
-           [interrupt: waiting_for_entries]
-                           ↓
-  generateSummaryNode（注入记忆上下文，生成有历史感的总结）
-                           ↓
-  ┌─────────────────────────────────────────────────────────┐
-  │ updateMemoryNode（静默更新记忆，不阻塞用户）← 新增      │
-  └────────────────────────┬────────────────────────────────┘
-                           ↓
-                          END
+### 猜谜图（GuessChatGraph）——V4 新增独立图
 
-  全程：思考日志实时推送 → 前端逐条展示
-  结束后：结果页留言 + 反应按钮
+```
+START
+  ↓
+generateHintNode            ← AI 根据歌曲生成第一条隐晦线索
+  ↓
+[interrupt: waiting_for_guess]  ← 等待用户输入猜测词
+  ↓
+judgeGuessNode              ← AI + Python 语义裁判（correct / close / wrong）
+  ↓
+───── 条件路由 ─────────────────────────────────────────
+  correct          → revealNode（庆祝揭晓）→ END
+  close/wrong
+  attempts < max   → generateHintNode（生成下一条提示）← 循环
+  attempts >= max  → revealNode（强制揭晓）→ END
+────────────────────────────────────────────────────────
+  ↓
+revealNode                  ← 生成有温度的揭晓文案
+  ↓
+ END
+```
+
+**图的隔离策略**：
+- 主游戏图：`thread_id = inviteCode`
+- 猜谜图：`thread_id = ${inviteCode}_guess_${participantId}`
+- 两图使用同一个 PostgresSaver，但 thread 完全独立，互不干扰
+- 每个玩家有自己独立的猜谜对话，互相不可见
+
+---
+
+## 3. 功能 A：记忆系统（已实现）
+
+> Phase 1 & 2 在当前代码中已基本实现，此处仅记录设计原则供参考。
+
+### 设计原则
+
+- **用户识别**：`localStorage` 存 `u_xxx` 格式的设备 ID，无需登录
+- **双人配对**：对两个 userId 排序拼接生成 pairId，确保 A+B = B+A
+- **主游戏图接入**：`loadMemoryNode` 开局加载，`updateMemoryNode` 结束后异步写入
+- **记忆注入**：以文字摘要形式追加到 generateTopicsNode 和 generateSummaryNode 的 prompt 上下文
+
+### 关键数据结构
+
+```
+UserMemory
+  userId          设备 ID
+  gamesPlayed     游戏次数
+  musicDNA        JSON { styles[], keywords[], songs[最近10首] }
+  usedTopics      JSON string[]（用于过滤重复主题）
+
+PairMemory
+  pairId          SHA256(sorted(userIdA + userIdB))
+  gamesPlayed     共同游戏次数
+  gameHistory     JSON GameSnapshot[]（最近10局快照）
+  relationTags    JSON string[]（累计关系标签）
+  cumulativeMood  JSON string[]（累计氛围词）
+
+GameReaction
+  roomId / participantId
+  accuracyVote    accurate | close | miss
+  comment         最多100字
 ```
 
 ---
 
-## 3. 功能 A：记忆系统
+## 4. 功能 B：Agent 思考直播（已实现）
 
-### 3.1 用户识别（无需登录）
+### 设计原则
 
-```typescript
-// lib/userIdentity.ts
-export function getUserId(): string {
-  if (typeof window === "undefined") return "";
-  let uid = localStorage.getItem("music_uid");
-  if (!uid) {
-    uid = `u_${nanoid(12)}`;
-    localStorage.setItem("music_uid", uid);
+- 前端轮询（3s 间隔）`/api/rooms/[roomId]` 的 `agentExecutionLog` 字段
+- 维护"已展示数量"指针，每次只追加新条目，有逐条入场动画
+- 每条日志标注节点名、类型（llm/tool/human/route）、耗时
+- 游戏进行中显示"运行中"脉冲动画，结束后停止轮询
+
+### 可视化目标
+
+```
+🤖 Agent 工作日志          [▼ 展开]
+────────────────────────────────────
+🗂️ 加载历史记忆         route  12ms
+🧠 分析聊天内容         llm   1.2s
+🧠 生成抽签主题         llm   0.9s
+👤 等待双方抽签         human  ——
+👤 等待双方选歌         human  ——
+🧠 生成音乐总结         llm   2.1s
+🔧 验证推荐歌曲         tool  0.4s
+🗂️ 更新记忆档案         route  ——（异步）
+```
+
+---
+
+## 5. 功能 C：AI 引导猜谜（V4 核心新增）
+
+### 5.1 游戏流程
+
+```
+双方都提交歌曲，进入结果页
+          ↓
+[我的结果卡片：我的主题 + 我的歌]
+[对方结果卡片：只看到歌，主题隐藏]
+          ↓
+「猜一猜」区域（独立 GuessChatGraph 驱动）
+          ↓
+AI 开场线索 → 用户猜 → AI 判断 → 提示/揭晓
+（最多 3 次，也可随时放弃看答案）
+          ↓
+猜测结束后，对方主题揭晓，结果卡片完整展示
+```
+
+### 5.2 GuessChatGraph State 设计
+
+```
+GuessChatAnnotation:
+
+  // 输入（固定）
+  songName      string    对方选的歌
+  artist        string    歌手
+  topic         string    正确答案（AI 知道，用户不知道）
+  maxAttempts   number    默认 3
+
+  // 对话状态
+  messages      Message[] 追加模式，完整对话历史
+  attempts      number    已猜次数
+  userGuess     string    当前轮用户输入的猜测词
+
+  // AI 裁判结果
+  verdict       "correct" | "close" | "wrong" | "pending"
+  similarityScore number  Python 语义相似度得分（0-1）
+
+  // 最终状态
+  resolved      boolean
+  finalReveal   string    揭晓文案
+```
+
+### 5.3 节点设计
+
+#### generateHintNode（TypeScript）
+
+- 输入：songName、artist、对话历史、attempts
+- 职责：开场（attempts=0）或猜错后生成下一条提示
+- Prompt 要点：
+  - 开场：基于歌曲给一条隐晦线索，不超过 40 字，不直接说出主题词
+  - 猜错后：结合上轮 verdict（close/wrong）给更有针对性的提示，温度感语言（"很接近了！""换个方向想想..."）
+- 输出：追加一条 assistant 消息
+
+#### judgeGuessNode（TypeScript 调用 Python 服务）
+
+这是整个猜谜图最关键的节点，承担**双重裁判**职责：
+
+**第一层：Python 语义相似度（快速、精确）**
+
+在 `music-tool-server` 新增 `/judge-similarity` 端点：
+
+```
+POST /judge-similarity
+Input:  { guess: string, answer: string }
+Output: { score: float, level: "exact"|"close"|"related"|"far" }
+```
+
+Python 实现方案（`services/semantic.py`）：
+- 使用 `sentence-transformers` 的中文模型（如 `paraphrase-multilingual-MiniLM-L12-v2`）计算向量余弦相似度
+- 同时用 `rapidfuzz` 做字符串模糊匹配兜底
+- 打分规则（可调）：
+  - score > 0.85 → exact（猜对了）
+  - score > 0.65 → close（很接近）
+  - score > 0.45 → related（有相关性）
+  - score ≤ 0.45 → far（方向偏了）
+
+**第二层：LLM 语义兜底（处理歧义）**
+
+当 Python 得分落在模糊区间（0.55-0.75）时，调用 LLM 做最终裁决：
+
+```
+System: 你是猜谜裁判。正确答案是"${topic}"，用户猜的是"${userGuess}"。
+        Python 相似度得分：${score}（接近临界值）。
+        综合语义和文化含义，判断是否算"猜对"？
+        返回 JSON: { verdict: "correct"|"close"|"wrong", reason: string }
+```
+
+**组合判断逻辑**：
+
+```
+Python 得分 → "exact"  →  verdict = correct（跳过 LLM）
+Python 得分 → "far"    →  verdict = wrong（跳过 LLM）
+Python 得分 → "close"/"related" → 调用 LLM 做最终判断
+```
+
+这样大多数情况不消耗 LLM Token，只在模糊边界才调 LLM，兼顾速度和准确度。
+
+#### routeAfterJudge（条件边）
+
+```
+correct                 → revealNode
+close/wrong + attempts < maxAttempts → generateHintNode（循环）
+close/wrong + attempts >= maxAttempts → revealNode（强制揭晓）
+```
+
+#### revealNode（TypeScript）
+
+- 猜对时：生成庆祝文案，引用用户的猜测过程（"你从第X次提示里读出了..."）
+- 猜错（超次数）时：温柔揭晓，用一句诗意文案连接两个主题
+  - 例：答案是「公路」，你猜的是「夜晚」→ "其实夜晚和公路本来就在同一条路上"
+- 输出写入 `finalReveal`，同时写入 `Participant.guessCorrect`
+
+### 5.4 API 设计
+
+**启动猜谜图**
+
+```
+POST /api/rooms/[roomId]/guess-chat/start
+Body: { participantId, sessionToken }
+
+→ 初始化 GuessChatGraph，传入对方的 songName/artist/topic
+→ 图运行到第一个 interrupt（generateHintNode 完成后）
+→ 返回 { threadId, firstHint: string }
+```
+
+**提交猜测（resume 图）**
+
+```
+POST /api/rooms/[roomId]/guess-chat/guess
+Body: { participantId, sessionToken, guess: string, threadId: string }
+
+→ resume GuessChatGraph，注入 { guess }
+→ 图运行到下一个 interrupt 或 END
+→ 返回 {
+    reply: string,          AI 回复
+    verdict: string,        correct/close/wrong
+    resolved: boolean,      是否猜测结束
+    answer?: string,        resolved=true 时揭晓
+    finalReveal?: string    resolved=true 时的揭晓文案
   }
-  return uid;
-}
-
-// 可选：显示"记忆码"让用户跨设备导入
-export function getMemoryCode(): string {
-  return getUserId().replace("u_", "MUSIC-").toUpperCase();
-}
 ```
 
-**机制**：首次访问时在 `localStorage` 写入一个随机 ID，之后每次访问读取同一个 ID。同设备同浏览器内持久化，无需账号。
+**放弃猜测**
+
+```
+POST /api/rooms/[roomId]/guess-chat/reveal
+Body: { participantId, sessionToken, threadId }
+
+→ 直接跳到 revealNode，强制揭晓
+→ 返回 { answer: string, finalReveal: string }
+```
+
+### 5.5 前端 UI 设计
+
+**猜谜区域（替换原有简单输入框）**
+
+```
+┌──────────────────────────────────────────┐
+│  猜一猜 🎯                               │
+│  对方选了《追光者》- 岑宁儿               │
+│                                          │
+│  ┌──────────────────────────────────┐   │
+│  │ 🤖 这首歌里有都市夜晚的气息，      │   │  ← AI 线索气泡
+│  │    副歌有一种追逐感...             │   │
+│  └──────────────────────────────────┘   │
+│                                          │
+│  ┌──────────────────────────────────┐   │
+│  │ 输入你的猜测...           [提交]  │   │
+│  └──────────────────────────────────┘   │
+│  还剩 2 次机会   [放弃，直接看答案]     │
+└──────────────────────────────────────────┘
+```
+
+**猜测进行中的对话流**
+
+```
+┌──────────────────────────────────────────┐
+│  🤖 ...（第一条线索）                    │
+│                           你：「失恋」   │
+│  🤖 方向偏了，这首歌其实更聚焦在           │
+│     一个具体的场景里                      │
+│                           你：「城市」   │
+│  🤖 🎉 就是这个！「城市」！              │
+│     你从第二条提示里读出了               │
+│     那种都市追逐的感觉                   │
+└──────────────────────────────────────────┘
+```
+
+**执行日志（AgentThinkingLog 里展示猜谜过程）**
+
+```
+🧠 生成开场线索    llm    850ms
+👤 等待猜测 #1    human   ——
+🔧 Python 语义判断 tool   45ms   → score: 0.21 (far)
+🧠 LLM 裁判       [跳过]
+🧠 生成提示 #2    llm    720ms
+👤 等待猜测 #2    human   ——
+🔧 Python 语义判断 tool   38ms   → score: 0.89 (exact)
+🧠 生成揭晓文案   llm    600ms
+```
+
+### 5.6 Python 微服务扩展（music-tool-server）
+
+在现有 `music-tool-server` 新增模块：
+
+**新增文件结构**
+
+```
+music-tool-server/
+  services/
+    semantic.py       ← 新增：语义相似度计算
+  routers/
+    judge.py          ← 新增：/judge-similarity 端点
+  requirements.txt    ← 新增：sentence-transformers
+```
+
+**services/semantic.py 设计**
+
+```python
+# 使用多语言句向量模型
+# 模型选型：paraphrase-multilingual-MiniLM-L12-v2（轻量，支持中文）
+# 首次加载约 500ms，之后缓存
+
+def compute_similarity(guess: str, answer: str) -> dict:
+    # 1. 向量余弦相似度（主要判断）
+    # 2. rapidfuzz 字符串比率（兜底）
+    # 3. 返回 score + level
+    pass
+```
+
+**部署注意点**
+
+- `sentence-transformers` 首次加载模型耗时较长，需要在 Railway 上预热
+- 模型文件约 400MB，需要配置足够的内存（建议 512MB+）
+- 替代方案：如内存不足，可用 DeepSeek embedding API 替代本地模型
 
 ---
 
-### 3.2 数据库新增两张表
+## 6. 功能 D：结果页留言（已实现）
 
-```prisma
-// prisma/schema.prisma 新增
+### 设计原则
 
-model UserMemory {
-  id          String   @id @default(cuid())
-  userId      String   @unique
-
-  gamesPlayed Int      @default(0)
-  nickname    String?  // 最近使用的昵称
-
-  // JSON: { styles: string[], keywords: string[], songs: SongRecord[] }
-  musicDNA    String?
-
-  // JSON: { topics: string[] }（玩过的主题，避免重复推荐）
-  usedTopics  String?
-
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-}
-
-model PairMemory {
-  id          String   @id @default(cuid())
-
-  // 由两个 userId 排序后拼接生成，确保唯一
-  // e.g. SHA256("u_aaa" + "_" + "u_bbb")
-  pairId      String   @unique
-
-  gamesPlayed Int      @default(0)
-
-  // JSON: GameSnapshot[]
-  // { gameId, date, topicA, topicB, songA, songB, summary }
-  gameHistory String?
-
-  // JSON: string[]（累计的关系标签，如"夜晚偏好者""公路旅行感"）
-  relationTags String?
-
-  // JSON: string[]（累计出现的氛围词）
-  cumulativeMood String?
-
-  updatedAt   DateTime @updatedAt
-}
-
-// 结果页留言
-model GameReaction {
-  id            String   @id @default(cuid())
-  roomId        String
-  participantId String
-  userId        String?  // 可选，匿名也可以留言
-
-  // "accurate" | "close" | "miss"
-  accuracyVote  String?
-
-  comment       String?  @db.VarChar(100)
-
-  createdAt     DateTime @default(now())
-
-  room          Room     @relation(fields: [roomId], references: [id])
-}
-```
+- 在 AI 总结展示后，允许每位玩家对总结投票（很准/有点像/没准）+ 留言最多 100 字
+- 每人只能提交一次（防重复）
+- 留言写入 `GameReaction` 表
+- `accuracyVote` 在 `updateMemoryNode` 里写入 `PairMemory`，下局 AI 总结可引用
 
 ---
 
-### 3.3 记忆相关类型定义
+## 7. 功能 E：首页欢迎回来（已实现）
 
-```typescript
-// lib/memory/types.ts
+### 设计原则
 
-export interface SongRecord {
-  songName: string;
-  artist: string;
-  topic: string;
-  date: string; // ISO string
-}
-
-export interface MusicDNA {
-  styles: string[];       // 音乐风格标签
-  keywords: string[];     // 高频情绪/意象词
-  songs: SongRecord[];    // 历史选歌（最近 10 首）
-}
-
-export interface GameSnapshot {
-  gameId: string;
-  date: string;
-  topicA: string;
-  topicB: string;
-  songA: { name: string; artist: string };
-  songB: { name: string; artist: string };
-  summaryExcerpt: string; // 总结前 50 字
-}
-
-export interface UserMemoryData {
-  gamesPlayed: number;
-  nickname?: string;
-  musicDNA?: MusicDNA;
-  usedTopics?: string[];
-}
-
-export interface PairMemoryData {
-  gamesPlayed: number;
-  gameHistory: GameSnapshot[];
-  relationTags: string[];
-  cumulativeMood: string[];
-}
-```
+- 首页加载时查询 `/api/memory/user?userId=xxx`
+- 有游戏记录时展示蓝紫横幅：游戏次数、上次选歌、偏好风格
+- 自动回填昵称
 
 ---
 
-### 3.4 LangGraph 新节点：loadMemoryNode
+## 8. FullGameAnnotation 更新（V4 猜谜相关字段）
 
-```typescript
-// lib/agent/memoryNodes.ts
+主游戏图的 state 不直接承载猜谜对话（猜谜图独立），但需要记录猜谜结果供揭晓展示和记忆更新使用：
 
-export async function loadMemoryNode(
-  state: typeof FullGameAnnotation.State
-): Promise<Partial<typeof FullGameAnnotation.State>> {
-  const start = new Date();
-
-  // userIdA / userIdB 由前端传入，存入 state
-  if (!state.userIdA && !state.userIdB) {
-    return {
-      executionLog: [makeLogEntry("loadMemoryNode", "route", start, new Date(), "无用户ID，跳过记忆加载")],
-    };
-  }
-
-  const [memA, memB, pairMem] = await Promise.all([
-    getUserMemory(state.userIdA),
-    getUserMemory(state.userIdB),
-    getPairMemory(state.userIdA, state.userIdB),
-  ]);
-
-  const summary = buildMemorySummary(memA, memB, pairMem);
-  const end = new Date();
-
-  return {
-    userMemories: [memA, memB],
-    pairMemory: pairMem,
-    memoryContextSummary: summary,
-    executionLog: [
-      makeLogEntry(
-        "loadMemoryNode",
-        "llm",
-        start,
-        end,
-        pairMem?.gamesPlayed
-          ? `加载记忆：这是第 ${pairMem.gamesPlayed + 1} 局，上次玩于 ${pairMem.gameHistory?.at(-1)?.date?.slice(0, 10)}`
-          : "首次相遇，初始化记忆"
-      ),
-    ],
-  };
-}
-
-// 把记忆结构化为 prompt 可用的文字摘要
-function buildMemorySummary(
-  memA?: UserMemoryData,
-  memB?: UserMemoryData,
-  pair?: PairMemoryData
-): string {
-  const parts: string[] = [];
-
-  if (pair?.gamesPlayed) {
-    parts.push(`这是两人第 ${pair.gamesPlayed + 1} 次一起玩。`);
-    const lastGame = pair.gameHistory?.at(-1);
-    if (lastGame) {
-      parts.push(
-        `上次（${lastGame.date.slice(0, 10)}）：${lastGame.topicA}/${lastGame.topicB}，` +
-        `分别选了《${lastGame.songA.name}》和《${lastGame.songB.name}》。`
-      );
-    }
-    if (pair.cumulativeMood?.length) {
-      parts.push(`两人共同的氛围词：${pair.cumulativeMood.slice(0, 5).join("、")}。`);
-    }
-  }
-
-  if (memA?.musicDNA?.styles?.length) {
-    parts.push(`参与者A偏好：${memA.musicDNA.styles.slice(0, 3).join("、")}。`);
-  }
-  if (memB?.musicDNA?.styles?.length) {
-    parts.push(`参与者B偏好：${memB.musicDNA.styles.slice(0, 3).join("、")}。`);
-  }
-
-  return parts.join("") || "";
-}
+```
+新增字段：
+  guessResultA    { correct: boolean, attempts: number }
+  guessResultB    { correct: boolean, attempts: number }
+  
+  （猜谜图结束后，由 /guess-chat/guess 路由写入数据库 Participant 字段，
+   主游戏图通过 loadState 读取，不需要在主图 state 里传递）
 ```
 
 ---
 
-### 3.5 LangGraph 新节点：updateMemoryNode
-
-```typescript
-export async function updateMemoryNode(
-  state: typeof FullGameAnnotation.State
-): Promise<Partial<typeof FullGameAnnotation.State>> {
-  const start = new Date();
-
-  // 异步写入，不等待结果（不阻塞用户看结果）
-  updateMemoriesAsync(state).catch((e) =>
-    console.error("[updateMemoryNode] 写入失败:", e)
-  );
-
-  return {
-    executionLog: [
-      makeLogEntry("updateMemoryNode", "route", start, new Date(), "记忆更新中（后台异步）"),
-    ],
-  };
-}
-
-async function updateMemoriesAsync(state: typeof FullGameAnnotation.State) {
-  const [a, b] = state.participants;
-  const roomId = state.roomId;
-
-  // 用 AI 从本局提取风格标签和关键词，更新用户 DNA
-  const [dnaA, dnaB] = await Promise.all([
-    extractMusicDNA(a, state.extractedKeywords, state.extractedMood),
-    extractMusicDNA(b, state.extractedKeywords, state.extractedMood),
-  ]);
-
-  // 构建本局快照
-  const snapshot: GameSnapshot = {
-    gameId: roomId,
-    date: new Date().toISOString(),
-    topicA: a.drawnTopic,
-    topicB: b.drawnTopic,
-    songA: { name: a.entry.songName, artist: a.entry.artist },
-    songB: { name: b.entry.songName, artist: b.entry.artist },
-    summaryExcerpt: state.summary?.slice(0, 50) ?? "",
-  };
-
-  await Promise.all([
-    upsertUserMemory(state.userIdA, dnaA, a),
-    upsertUserMemory(state.userIdB, dnaB, b),
-    upsertPairMemory(state.userIdA, state.userIdB, snapshot, state),
-  ]);
-}
-```
-
----
-
-### 3.6 记忆在 Prompt 中的注入
-
-```typescript
-// generateTopicsNode 的 prompt 中加入：
-if (state.memoryContextSummary) {
-  contextParts.push(`历史记忆：${state.memoryContextSummary}`);
-  contextParts.push(`请避开已用过的主题：${state.usedTopics?.join("、")}`);
-}
-
-// generateSummaryNode 的 prompt 中加入：
-const memoryContext = state.pairMemory?.gamesPlayed
-  ? `\n历史背景：${state.memoryContextSummary}\n请在总结中自然地引用历史，体现这是第 ${state.pairMemory.gamesPlayed + 1} 局。`
-  : "";
-```
-
----
-
-### 3.7 首页"欢迎回来"展示
-
-```typescript
-// app/page.tsx 新增：加载用户记忆并展示
-
-useEffect(() => {
-  const uid = getUserId();
-  if (!uid) return;
-  fetch(`/api/memory/user?userId=${uid}`)
-    .then(r => r.json())
-    .then(data => {
-      if (data.gamesPlayed > 0) setUserMemory(data);
-    });
-}, []);
-
-// UI
-{userMemory && (
-  <div className="bg-gray-900 rounded-xl p-4 text-sm text-gray-400 mb-4">
-    <p>上次你选了《{userMemory.lastSong}》</p>
-    <p className="text-xs text-gray-600 mt-1">已玩 {userMemory.gamesPlayed} 局</p>
-  </div>
-)}
-```
-
----
-
-## 4. 功能 B：Agent 思考过程直播
-
-### 4.1 机制设计
-
-不需要 SSE，用**轮询**即可（每 1.5 秒请求一次）：
-- 前端在进入"等待总结"状态时开始轮询 `/api/rooms/[roomId]`
-- 服务端把执行日志按 `startAt` 排序后返回
-- 前端维护一个"已展示数量"的指针，每次有新条目就加入动画队列
-- 每条日志出现时有打字机动画效果
-
-### 4.2 前端展示组件
-
-```typescript
-// components/AgentThinking.tsx
-
-function AgentThinking({ roomId }: { roomId: string }) {
-  const [visibleLogs, setVisibleLogs] = useState<ExecutionLogEntry[]>([]);
-  const shownCount = useRef(0);
-
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      const res = await fetch(`/api/rooms/${roomId}`);
-      const data = await res.json();
-      const logs: ExecutionLogEntry[] = data.agentExecutionLog ?? [];
-
-      // 只追加新的条目
-      if (logs.length > shownCount.current) {
-        const newLogs = logs.slice(shownCount.current);
-        shownCount.current = logs.length;
-        setVisibleLogs(prev => [...prev, ...newLogs]);
-      }
-
-      // 游戏结束则停止轮询
-      if (data.status === "completed") clearInterval(timer);
-    }, 1500);
-
-    return () => clearInterval(timer);
-  }, [roomId]);
-
-  return (
-    <div className="space-y-2">
-      <p className="text-xs text-gray-500">Agent 正在思考...</p>
-      {visibleLogs.map((log, i) => (
-        <div
-          key={i}
-          className="flex items-start gap-2 text-xs animate-fade-in"
-        >
-          <span className="text-indigo-400 mt-0.5">
-            {log.type === "llm" ? "⚙" : log.type === "human" ? "👤" : "→"}
-          </span>
-          <div>
-            <span className="text-gray-300">{log.summary}</span>
-            <span className="text-gray-600 ml-2">{log.durationMs}ms</span>
-          </div>
-        </div>
-      ))}
-      {/* 最后一条之后显示加载动画 */}
-      <div className="flex gap-1 pl-4">
-        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce" />
-        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce delay-100" />
-        <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce delay-200" />
-      </div>
-    </div>
-  );
-}
-```
-
----
-
-## 5. 功能 C：互猜环节
-
-### 5.1 流程设计
+## 9. 完整系统架构图（V4）
 
 ```
-抽签完成后，进入新阶段 "guessing"
-         ↓
-每人看到自己的主题
-         ↓
-"猜猜对方抽到了什么主题？"（从主题池里随机抽 4 个含正确答案的选项）
-         ↓
-两人都猜完后，进入提交歌曲阶段
-         ↓
-揭晓：猜对/猜错，对方主题是什么
-```
-
-### 5.2 数据库变更
-
-```prisma
-// Participant 表新增
-model Participant {
-  // ...现有字段
-  guess        String?  // 猜测对方主题
-  guessCorrect Boolean? // 是否猜对（提交后服务端计算）
-}
-```
-
-### 5.3 API 新增
-
-```typescript
-// POST /api/rooms/[roomId]/guess
-// body: { participantId, sessionToken, guess: string }
-```
-
-### 5.4 前端新阶段
-
-```
-type Stage = "waiting" | "draw" | "guessing" | "submit" | "result"
-```
-
-猜题界面：
-```
-┌────────────────────────────────┐
-│  你抽到了：夜晚                 │
-│                                │
-│  猜猜对方抽到了什么？           │
-│                                │
-│  ○ 公路    ○ 颜色              │
-│  ● 天空    ○ 海边              │  ← 选中状态
-│                                │
-│  [确认]                        │
-└────────────────────────────────┘
-```
-
-揭晓时（在提交页顶部）：
-```
-┌────────────────────────────────┐
-│  对方的主题是：公路             │
-│  你猜的是：天空                 │
-│  ✗ 差一点 — 但也许夜晚和公路   │
-│    本来就是同一条路。           │
-└────────────────────────────────┘
-```
-
-最后一句"但也许..."由 LLM 根据两个主题即兴生成。
-
----
-
-## 6. 功能 D：结果页留言
-
-### 6.1 UI 设计
-
-总结展示完后，在页面底部：
-
-```
-┌────────────────────────────────────────┐
-│  AI 说得准吗？                          │
-│                                        │
-│  [✓ 说到了]  [≈ 差一点]  [✗ 完全不对] │
-│                                        │
-│  留一句话（可选）                       │
-│  ┌─────────────────────────────────┐   │
-│  │ 其实那首歌是另一个故事              │   │
-│  └─────────────────────────────────┘   │
-│  [提交]                                │
-│                                        │
-│  对方说：[≈ 差一点]                    │
-│  "准但不全对"                          │
-└────────────────────────────────────────┘
-```
-
-### 6.2 API
-
-```typescript
-// POST /api/rooms/[roomId]/reaction
-// body: { participantId, sessionToken, accuracyVote, comment }
-
-// GET /api/rooms/[roomId]/reactions（结果页轮询获取双方留言）
-```
-
-### 6.3 留言写入记忆
-
-`accuracyVote` 写入 PairMemory，下次游戏结束时 AI 可以引用：
-```
-上次 A 觉得总结"说到了"，B 觉得"差一点"
-```
-
----
-
-## 7. FullGameAnnotation 更新
-
-V4 需要在现有 state 里新增字段：
-
-```typescript
-export const FullGameAnnotation = Annotation.Root({
-  // ...现有字段
-
-  // V4 新增：记忆系统
-  userIdA: Annotation<string>({ value: (_p, n) => n, default: () => "" }),
-  userIdB: Annotation<string>({ value: (_p, n) => n, default: () => "" }),
-  userMemories: Annotation<UserMemoryData[]>({ value: (_p, n) => n, default: () => [] }),
-  pairMemory: Annotation<PairMemoryData | undefined>({ value: (_p, n) => n, default: () => undefined }),
-  memoryContextSummary: Annotation<string>({ value: (_p, n) => n, default: () => "" }),
-  usedTopics: Annotation<string[]>({ value: (_p, n) => n, default: () => [] }),
-
-  // V4 新增：互猜
-  guesses: Annotation<Record<string, string>>({ value: (_p, n) => n, default: () => ({}) }),
-  guessRevealText: Annotation<string>({ value: (_p, n) => n, default: () => "" }),
-});
-```
-
----
-
-## 8. 完整 LangGraph V4 图
-
-```typescript
-const graph = new StateGraph(FullGameAnnotation)
-  .addNode("loadMemoryNode", loadMemoryNode)       // 新增
-  .addNode("analyzeChatNode", fullAnalyzeChatNode)
-  .addNode("generateTopicsNode", fullGenerateTopicsNode)
-  .addNode("waitForDrawsNode", waitForDrawsNode)   // 含互猜 interrupt
-  .addNode("waitForEntriesNode", waitForEntriesNode)
-  .addNode("generateSummaryNode", fullGenerateSummaryNode)
-  .addNode("updateMemoryNode", updateMemoryNode)   // 新增
-  .addEdge(START, "loadMemoryNode")                // 从记忆开始
-  .addEdge("loadMemoryNode", "analyzeChatNode")
-  .addEdge("analyzeChatNode", "generateTopicsNode")
-  .addEdge("generateTopicsNode", "waitForDrawsNode")
-  .addEdge("waitForDrawsNode", "waitForEntriesNode")
-  .addEdge("waitForEntriesNode", "generateSummaryNode")
-  .addEdge("generateSummaryNode", "updateMemoryNode") // 新增
-  .addEdge("updateMemoryNode", END);
-```
-
----
-
-## 9. 数据库迁移
-
-```sql
--- 新增 UserMemory 表
-CREATE TABLE "UserMemory" (
-  "id"          TEXT NOT NULL PRIMARY KEY,
-  "userId"      TEXT NOT NULL UNIQUE,
-  "gamesPlayed" INTEGER NOT NULL DEFAULT 0,
-  "nickname"    TEXT,
-  "musicDNA"    TEXT,
-  "usedTopics"  TEXT,
-  "createdAt"   TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updatedAt"   TIMESTAMP(3) NOT NULL
-);
-
--- 新增 PairMemory 表
-CREATE TABLE "PairMemory" (
-  "id"             TEXT NOT NULL PRIMARY KEY,
-  "pairId"         TEXT NOT NULL UNIQUE,
-  "gamesPlayed"    INTEGER NOT NULL DEFAULT 0,
-  "gameHistory"    TEXT,
-  "relationTags"   TEXT,
-  "cumulativeMood" TEXT,
-  "updatedAt"      TIMESTAMP(3) NOT NULL
-);
-
--- 新增 GameReaction 表
-CREATE TABLE "GameReaction" (
-  "id"            TEXT NOT NULL PRIMARY KEY,
-  "roomId"        TEXT NOT NULL,
-  "participantId" TEXT NOT NULL,
-  "userId"        TEXT,
-  "accuracyVote"  TEXT,
-  "comment"       TEXT,
-  "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- Participant 表新增互猜字段
-ALTER TABLE "Participant" ADD COLUMN "guess"        TEXT;
-ALTER TABLE "Participant" ADD COLUMN "guessCorrect" BOOLEAN;
+┌─────────────────────────────────────────────────────────────────┐
+│                     Next.js Frontend                            │
+│  首页  →  房间页  →  抽签  →  提交歌曲  →  结果页  →  猜谜      │
+└──────────────┬──────────────────────────────────────┬───────────┘
+               │ API Routes                           │ API Routes
+               ↓                                      ↓
+┌──────────────────────────┐          ┌───────────────────────────┐
+│   MainGameGraph          │          │   GuessChatGraph          │
+│   (LangGraph TS)         │          │   (LangGraph TS)          │
+│                          │          │                           │
+│  loadMemory              │          │  generateHint             │
+│  analyzeChat             │          │  ← interrupt →            │
+│  generateTopics          │          │  judgeGuess               │
+│  ← interrupt → draw      │          │  ← 条件循环 →             │
+│  ← interrupt → entries   │          │  reveal                   │
+│  generateSummary         │          │                           │
+│  updateMemory            │          │  thread: inviteCode       │
+│                          │          │         _guess_participantId│
+│  thread: inviteCode      │          └──────────────┬────────────┘
+└────────────┬─────────────┘                         │
+             │                                       │ 调用
+             ↓                                       ↓
+┌────────────────────────────────────────────────────────────────┐
+│                  PostgresSaver (Neon PostgreSQL)               │
+│  两张图共享同一个 checkpointer，thread 隔离互不干扰             │
+└────────────────────────────────────────────────────────────────┘
+             │ Tool Call                             │ HTTP
+             ↓                                       ↓
+┌────────────────────────────────────────────────────────────────┐
+│               Python FastAPI (music-tool-server)               │
+│                                                                │
+│  /search           网易云歌曲搜索                               │
+│  /verify           歌曲验证 + rapidfuzz 模糊匹配                │
+│  /judge-similarity 语义相似度（sentence-transformers）← V4新增  │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -653,44 +460,78 @@ ALTER TABLE "Participant" ADD COLUMN "guessCorrect" BOOLEAN;
 ## 10. 实现顺序
 
 ```
-Phase 1（2 天）：数据库 + 记忆 CRUD
-  - schema.prisma 新增三张表 + 执行迁移
-  - lib/memory/ 目录：getUserMemory、upsertUserMemory、getPairMemory
-  - /api/memory/user 接口
+✅ Phase 1（已完成）：数据库 + 记忆 CRUD
+   - UserMemory / PairMemory / GameReaction 表
+   - lib/memory/ CRUD 函数
 
-Phase 2（1.5 天）：LangGraph 接入记忆
-  - loadMemoryNode + updateMemoryNode
-  - FullGameAnnotation 新增字段
-  - generateTopicsNode / generateSummaryNode prompt 注入记忆上下文
-  - 前端 getUserId() + 传 userId 到创建房间 API
+✅ Phase 2（已完成）：MainGameGraph 接入记忆
+   - loadMemoryNode + updateMemoryNode
+   - FullGameAnnotation 新增记忆字段
 
-Phase 3（1 天）：思考直播
-  - AgentThinking 组件
-  - 等待总结阶段接入轮询
+✅ Phase 3（已完成）：Agent 思考直播
+   - AgentThinkingLog 组件（轮询 + 逐条动画）
 
-Phase 4（1 天）：互猜环节
-  - Participant 新字段 + /api/rooms/[roomId]/guess
-  - 前端新增 guessing 阶段
-  - 揭晓文案 LLM 生成
+✅ Phase 4（已完成，待优化）：基础互猜 + 留言
+   - 简单字符串猜测 + guess API + reaction API
+   - 对方主题猜测结果出来前隐藏
 
-Phase 5（0.5 天）：结果页留言
-  - GameReaction 表 + /api/rooms/[roomId]/reaction
-  - 前端投票 + 留言 UI
-  - 写入 PairMemory
+✅ Phase 5（已完成）：AI 总结分离
+   - entries 快速返回 + /summarize 独立路由（maxDuration=60）
 
-Phase 6（0.5 天）：首页欢迎回来
-  - 读取用户记忆展示上次选歌
-  - 结果页局数标签 + 历史折叠栏
+────────── 下阶段开发 ──────────
+
+Phase 6：Python 语义裁判服务
+   - music-tool-server 新增 services/semantic.py
+   - sentence-transformers 中文模型集成
+   - /judge-similarity 端点
+   - Railway 部署 + 内存配置
+
+Phase 7：GuessChatGraph 独立图（TypeScript）
+   - lib/agent/guessChatGraph.ts
+   - GuessChatAnnotation 定义
+   - generateHintNode / judgeGuessNode / revealNode
+   - 条件路由（correct/close/wrong/maxAttempts）
+   - 接入 PostgresSaver（独立 thread）
+
+Phase 8：Guess Chat API 路由
+   - /api/rooms/[roomId]/guess-chat/start
+   - /api/rooms/[roomId]/guess-chat/guess
+   - /api/rooms/[roomId]/guess-chat/reveal
+
+Phase 9：前端猜谜对话 UI
+   - 对话气泡组件（AI 线索 + 用户猜测历史）
+   - 替换现有简单输入框
+   - 放弃按钮 + 次数显示
+   - 揭晓动画
+   - 猜谜过程写入 AgentThinkingLog
+
+Phase 10：端到端测试 + 记忆闭环验证
+   - 连续两局游戏，验证记忆注入是否生效
+   - 猜谜全流程测试（3轮猜测 + 放弃 + 正确）
+   - Python 语义判断准确率验证
 ```
 
 ---
 
-## 11. 简历叙事升级
+## 11. 技术风险与备选方案
 
-完成 V4 后，项目可以描述为：
+| 风险 | 描述 | 备选方案 |
+|------|------|---------|
+| sentence-transformers 内存 | 模型约 400MB，Railway 免费版可能不够 | 用 DeepSeek Embedding API 替代本地模型 |
+| GuessChatGraph 超时 | 3 轮猜测 = 最多 6 次 LLM 调用 + 3 次 interrupt，每次 resume 是独立请求，不存在超时 | 架构天然规避此问题 |
+| Python 模型首次加载慢 | 冷启动约 5-10s | 在 start/guess-chat 路由加 Loading 态，或预热 |
+| 跨图状态同步 | 猜谜结果需要回写到数据库，主游戏图不直接感知 | API 层写入 Participant 字段，前端轮询读取 |
+
+---
+
+## 12. 简历叙事升级（V4 完成后）
 
 > **具备长期记忆的双人音乐 Agent**
 >
-> 基于 LangGraph HITL + PostgreSQL Checkpointer 构建，Agent 跨会话追踪用户音乐偏好 DNA，积累双人关系记忆，动态调整主持对话策略和主题生成。集成 Python FastAPI 工具层（网易云搜索+模糊匹配）实现 Tool Use + ReAct 推荐验证。包含思考过程可视化、互猜互动环节、留言反馈闭环，覆盖 Agent 感知、记忆、规划、行动四大核心能力。
+> 基于 LangGraph HITL + PostgreSQL Checkpointer 构建。系统包含两张独立 LangGraph：主游戏图负责聊天分析、主题生成和音乐总结，猜谜图实现带条件循环的多轮 AI 主持对话（AI 同时扮演主持人和裁判，通过 Python sentence-transformers 语义相似度 + LLM 语义兜底完成猜测判断）。
 >
-> 技术栈：Next.js / TypeScript + LangGraph + PostgreSQL + Python FastAPI + DeepSeek LLM
+> Agent 跨会话追踪用户音乐偏好 DNA，积累双人关系记忆，动态调整主题生成策略和总结风格。集成 Python FastAPI 工具层实现 Tool Use + ReAct 推荐验证。思考过程全程可视化，每个节点的耗时和判断结果实时推送到前端。
+>
+> 覆盖 Agent 核心能力：感知（聊天分析）、记忆（跨局 UserMemory/PairMemory）、规划（条件路由/循环图）、行动（Tool Use / Human-in-the-loop）、反思（语义裁判 + 动态提示生成）。
+>
+> **技术栈**：Next.js / TypeScript · LangGraph · PostgreSQL (Neon) · Python FastAPI · sentence-transformers · DeepSeek LLM
