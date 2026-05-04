@@ -9,529 +9,472 @@
 
 ### V3 已有
 
-- LangGraph 完整游戏图（真正的 Human-in-the-loop + interrupt/resume）
-- Tool Use + ReAct（searchNeteaseTool 验证推荐歌曲）
-- PostgreSQL Checkpointer（跨 Serverless 状态持久化）
-- Python FastAPI 微服务（网易云搜索 + rapidfuzz 模糊匹配）
-- 前端歌曲搜索联想框
-- Agent 执行日志（静态展示）
+- **TypeScript LangGraph**：完整主游戏图，真正 Human-in-the-loop（interrupt/resume）
+- **Tool Use + ReAct**：searchNeteaseTool 验证推荐歌曲
+- **PostgreSQL Checkpointer**：PostgresSaver 跨 Serverless 状态持久化
+- **Python FastAPI 微服务**（`music-tool-server`）：网易云搜索 + rapidfuzz 模糊匹配
+- 前端歌曲搜索联想框、Agent 执行日志展示
 
 ### V4 新增五项能力
 
-| 能力 | 核心价值 | 技术方向 |
-|------|---------|---------|
-| A. 记忆系统 | Agent 认识你，积累音乐历史 | UserMemory + PairMemory + LangGraph 新节点 |
-| B. Agent 思考直播 | 等待时共同观看 AI 工作过程 | 轮询执行日志 + 逐条动画展示 |
-| C. AI 引导猜谜（本文重点） | 用独立 LangGraph 图实现多轮 AI 主持猜题 | 独立 GuessChatGraph + Python 语义裁判 |
-| D. 结果页留言 | 对 AI 总结给出反应，留下印记 | GameReaction 表 + 实时同步 |
-| E. 首页欢迎回来 | 有历史感的开场 | 读取 UserMemory 展示 |
+| 能力 | 核心价值 | 技术方向 | 状态 |
+|------|---------|---------|------|
+| A. 记忆系统 | Agent 认识你，积累音乐历史 | UserMemory + PairMemory + TS LangGraph 新节点 | ✅ 已实现 |
+| B. Agent 思考直播 | 等待时共同观看 AI 工作过程 | 轮询执行日志 + 逐条动画 | ✅ 已实现 |
+| C. AI 引导猜谜 | 多轮对话 + AI 主持 + 语义裁判 | **Python LangGraph（GuessChatGraph）** | 🔜 本阶段目标 |
+| D. 结果页留言 | 对 AI 总结给出反应 | GameReaction 表 + 投票 UI | ✅ 已实现 |
+| E. 首页欢迎回来 | 有历史感的开场 | 读取 UserMemory | ✅ 已实现 |
 
 ---
 
-## 2. 整体架构
+## 2. 整体架构（方案 C）
 
-### 主游戏图（MainGameGraph）——已实现，V4 扩展
+### 核心架构原则
+
+> **TypeScript 负责主游戏，Python 负责猜谜 Agent。**
+> 两张 LangGraph 图语言不同，但共享同一个 PostgreSQL Checkpointer（底层 `checkpoints` 表格式兼容）。
+> Next.js 既调 TypeScript 图（直接调用），也调 Python 图（通过 HTTP 转发）。
 
 ```
-loadMemoryNode（加载双方历史记忆）
-        ↓
-analyzeChatNode → generateTopicsNode
-        ↓
-[interrupt: waiting_for_draws]     ← 抽签
-        ↓
-[interrupt: waiting_for_entries]   ← 提交歌曲
-        ↓
-generateSummaryNode（注入记忆上下文）
-        ↓
-updateMemoryNode（后台异步写入记忆）
-        ↓
-       END
+┌──────────────────────────────────────────────────────────────────┐
+│                    Next.js Frontend (Vercel)                     │
+│  首页  →  房间页  →  抽签  →  提交歌曲  →  结果页               │
+│                                          ↕                      │
+│                                     猜谜对话 UI                  │
+└────────────┬──────────────────────────────┬──────────────────────┘
+             │ Next.js API Routes            │ Next.js API Routes
+             │                              │（/api/guess-chat/*）
+             ↓                              ↓ 转发到 Python
+┌────────────────────────┐    ┌─────────────────────────────────────┐
+│  MainGameGraph         │    │  music-tool-server (Railway · Python)│
+│  TypeScript LangGraph  │    │                                     │
+│                        │    │  ┌─────────────────────────────┐    │
+│  loadMemory            │    │  │  GuessChatGraph             │    │
+│  analyzeChat           │    │  │  Python LangGraph           │    │
+│  generateTopics        │    │  │                             │    │
+│  ← interrupt → draw    │    │  │  judge_and_hint_node        │    │
+│  ← interrupt → entries │    │  │  ← interrupt → wait_guess  │    │
+│  generateSummary       │    │  │  (循环 ≤ 3 次)              │    │
+│  updateMemory          │    │  │  reveal_node                │    │
+│                        │    │  └─────────────────────────────┘    │
+│  thread: inviteCode    │    │                                     │
+└────────────┬───────────┘    │  /search  /verify  （已有工具）     │
+             │                │  /guess-chat/start                  │
+             │                │  /guess-chat/guess                  │
+             │                │  /guess-chat/reveal                 │
+             ↓                └──────────────────┬──────────────────┘
+┌────────────────────────────────────────────────┴──────────────────┐
+│                  PostgreSQL · Neon                                 │
+│  两张图共用同一个数据库，PostgresSaver 底层表格式跨语言兼容        │
+│  thread: inviteCode              ← 主游戏图                       │
+│  thread: inviteCode_guess_A      ← A 的猜谜对话                   │
+│  thread: inviteCode_guess_B      ← B 的猜谜对话（并行互不干扰）    │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-### 猜谜图（GuessChatGraph）——V4 新增独立图
+---
+
+## 3. 功能 A/B/D/E（已实现，设计回顾）
+
+### A. 记忆系统
+
+- **用户识别**：`localStorage` 存 `u_xxx` 设备 ID，无需注册
+- **双人配对**：两个 userId 排序拼接生成 `pairId`，A+B 恒等于 B+A
+- **LoadMemory**：主游戏图起点，加载 `UserMemory` + `PairMemory`，构建文字摘要注入后续节点 prompt
+- **UpdateMemory**：主游戏图终点，异步写入（不阻塞用户看结果）
+- **数据表**：`UserMemory`（音乐 DNA + 历史主题）、`PairMemory`（共同游戏快照 + 关系标签）
+
+### B. Agent 思考直播
+
+- 前端 3s 轮询 `agentExecutionLog`，逐条追加到日志面板
+- 每条记录节点名、类型（llm/tool/human/route）、耗时
+- 猜谜图的执行日志也会追加进来，完整展示两张图的工作轨迹
+
+### D/E. 留言 + 欢迎回来
+
+- `GameReaction` 表存 `accuracyVote`（准/接近/没准）+ 最多 100 字留言
+- 首页读取 `UserMemory` 展示欢迎横幅 + 自动回填昵称
+
+---
+
+## 4. 功能 C：AI 引导猜谜（本阶段核心）
+
+### 4.1 游戏流程
+
+```
+双方提交歌曲，进入结果页
+        ↓
+[我的卡片：主题 + 歌曲 完整展示]
+[对方卡片：只看到歌曲，主题隐藏 → "猜对后揭晓"]
+        ↓
+┌─────────────────────────────────────┐
+│  「猜一猜」区域（GuessChatGraph 驱动）│
+│                                     │
+│  AI 开场线索                         │
+│    ↓ 用户猜                          │
+│  AI 裁判 + 新提示（最多 3 轮）         │
+│    ↓ correct 或超次数                │
+│  AI 揭晓文案                         │
+└─────────────────────────────────────┘
+        ↓
+对方主题揭晓，卡片显示完整信息
+        ↓
+AI 总结 + 留言 + Agent 日志
+```
+
+### 4.2 GuessChatGraph（Python LangGraph）
+
+#### State 定义
+
+```python
+class GuessState(TypedDict):
+    # ── 输入（游戏开始时注入，全程不变）
+    song_name: str          # 对方的歌
+    artist: str             # 歌手
+    topic: str              # 正确答案（AI 知道，用户不知道）
+    max_attempts: int       # 最大猜测次数，默认 3
+
+    # ── 对话状态
+    messages: list[dict]    # 完整对话历史，追加模式
+    attempts: int           # 已猜次数（0 = 还没猜过）
+    user_guess: str | None  # 当前轮用户的猜测词
+
+    # ── 裁判结果
+    verdict: Literal["correct", "close", "wrong", "pending"]
+
+    # ── 终态
+    resolved: bool
+    final_reveal: str | None   # 揭晓文案
+```
+
+#### 图结构
 
 ```
 START
   ↓
-generateHintNode            ← AI 根据歌曲生成第一条隐晦线索
+judge_and_hint_node    ← 开场（attempts=0）生成第一条线索
+                         有猜测时：LLM 一次调用完成裁判 + 生成提示
   ↓
-[interrupt: waiting_for_guess]  ← 等待用户输入猜测词
+─── 条件路由 ──────────────────────────────────────────────
+  verdict=correct                       → reveal_node
+  verdict=close/wrong, attempts<max     → wait_for_guess_node（循环）
+  verdict=close/wrong, attempts>=max    → reveal_node（强制揭晓）
+────────────────────────────────────────────────────────────
   ↓
-judgeGuessNode              ← AI + Python 语义裁判（correct / close / wrong）
+wait_for_guess_node    ← interrupt()，暂停等待用户输入
+  ↓（resume 后）
+judge_and_hint_node    ← 循环回裁判节点
   ↓
-───── 条件路由 ─────────────────────────────────────────
-  correct          → revealNode（庆祝揭晓）→ END
-  close/wrong
-  attempts < max   → generateHintNode（生成下一条提示）← 循环
-  attempts >= max  → revealNode（强制揭晓）→ END
-────────────────────────────────────────────────────────
+reveal_node            ← 生成揭晓文案
   ↓
-revealNode                  ← 生成有温度的揭晓文案
-  ↓
- END
+END
 ```
 
-**图的隔离策略**：
-- 主游戏图：`thread_id = inviteCode`
-- 猜谜图：`thread_id = ${inviteCode}_guess_${participantId}`
-- 两图使用同一个 PostgresSaver，但 thread 完全独立，互不干扰
-- 每个玩家有自己独立的猜谜对话，互相不可见
+#### judge_and_hint_node 设计（核心节点）
 
----
-
-## 3. 功能 A：记忆系统（已实现）
-
-> Phase 1 & 2 在当前代码中已基本实现，此处仅记录设计原则供参考。
-
-### 设计原则
-
-- **用户识别**：`localStorage` 存 `u_xxx` 格式的设备 ID，无需登录
-- **双人配对**：对两个 userId 排序拼接生成 pairId，确保 A+B = B+A
-- **主游戏图接入**：`loadMemoryNode` 开局加载，`updateMemoryNode` 结束后异步写入
-- **记忆注入**：以文字摘要形式追加到 generateTopicsNode 和 generateSummaryNode 的 prompt 上下文
-
-### 关键数据结构
+**一次 LLM 调用完成两件事**：裁判当前猜测 + 生成下一条提示（或揭晓前文案）
 
 ```
-UserMemory
-  userId          设备 ID
-  gamesPlayed     游戏次数
-  musicDNA        JSON { styles[], keywords[], songs[最近10首] }
-  usedTopics      JSON string[]（用于过滤重复主题）
-
-PairMemory
-  pairId          SHA256(sorted(userIdA + userIdB))
-  gamesPlayed     共同游戏次数
-  gameHistory     JSON GameSnapshot[]（最近10局快照）
-  relationTags    JSON string[]（累计关系标签）
-  cumulativeMood  JSON string[]（累计氛围词）
-
-GameReaction
-  roomId / participantId
-  accuracyVote    accurate | close | miss
-  comment         最多100字
-```
-
----
-
-## 4. 功能 B：Agent 思考直播（已实现）
-
-### 设计原则
-
-- 前端轮询（3s 间隔）`/api/rooms/[roomId]` 的 `agentExecutionLog` 字段
-- 维护"已展示数量"指针，每次只追加新条目，有逐条入场动画
-- 每条日志标注节点名、类型（llm/tool/human/route）、耗时
-- 游戏进行中显示"运行中"脉冲动画，结束后停止轮询
-
-### 可视化目标
-
-```
-🤖 Agent 工作日志          [▼ 展开]
-────────────────────────────────────
-🗂️ 加载历史记忆         route  12ms
-🧠 分析聊天内容         llm   1.2s
-🧠 生成抽签主题         llm   0.9s
-👤 等待双方抽签         human  ——
-👤 等待双方选歌         human  ——
-🧠 生成音乐总结         llm   2.1s
-🔧 验证推荐歌曲         tool  0.4s
-🗂️ 更新记忆档案         route  ——（异步）
-```
-
----
-
-## 5. 功能 C：AI 引导猜谜（V4 核心新增）
-
-### 5.1 游戏流程
-
-```
-双方都提交歌曲，进入结果页
-          ↓
-[我的结果卡片：我的主题 + 我的歌]
-[对方结果卡片：只看到歌，主题隐藏]
-          ↓
-「猜一猜」区域（独立 GuessChatGraph 驱动）
-          ↓
-AI 开场线索 → 用户猜 → AI 判断 → 提示/揭晓
-（最多 3 次，也可随时放弃看答案）
-          ↓
-猜测结束后，对方主题揭晓，结果卡片完整展示
-```
-
-### 5.2 GuessChatGraph State 设计
-
-```
-GuessChatAnnotation:
-
-  // 输入（固定）
-  songName      string    对方选的歌
-  artist        string    歌手
-  topic         string    正确答案（AI 知道，用户不知道）
-  maxAttempts   number    默认 3
-
-  // 对话状态
-  messages      Message[] 追加模式，完整对话历史
-  attempts      number    已猜次数
-  userGuess     string    当前轮用户输入的猜测词
-
-  // AI 裁判结果
-  verdict       "correct" | "close" | "wrong" | "pending"
-  similarityScore number  Python 语义相似度得分（0-1）
-
-  // 最终状态
-  resolved      boolean
-  finalReveal   string    揭晓文案
-```
-
-### 5.3 节点设计
-
-#### generateHintNode（TypeScript）
-
-- 输入：songName、artist、对话历史、attempts
-- 职责：开场（attempts=0）或猜错后生成下一条提示
-- Prompt 要点：
-  - 开场：基于歌曲给一条隐晦线索，不超过 40 字，不直接说出主题词
-  - 猜错后：结合上轮 verdict（close/wrong）给更有针对性的提示，温度感语言（"很接近了！""换个方向想想..."）
-- 输出：追加一条 assistant 消息
-
-#### judgeGuessNode（TypeScript 调用 Python 服务）
-
-这是整个猜谜图最关键的节点，承担**双重裁判**职责：
-
-**第一层：Python 语义相似度（快速、精确）**
-
-在 `music-tool-server` 新增 `/judge-similarity` 端点：
-
-```
-POST /judge-similarity
-Input:  { guess: string, answer: string }
-Output: { score: float, level: "exact"|"close"|"related"|"far" }
-```
-
-Python 实现方案（`services/semantic.py`）：
-- 使用 `sentence-transformers` 的中文模型（如 `paraphrase-multilingual-MiniLM-L12-v2`）计算向量余弦相似度
-- 同时用 `rapidfuzz` 做字符串模糊匹配兜底
-- 打分规则（可调）：
-  - score > 0.85 → exact（猜对了）
-  - score > 0.65 → close（很接近）
-  - score > 0.45 → related（有相关性）
-  - score ≤ 0.45 → far（方向偏了）
-
-**第二层：LLM 语义兜底（处理歧义）**
-
-当 Python 得分落在模糊区间（0.55-0.75）时，调用 LLM 做最终裁决：
-
-```
-System: 你是猜谜裁判。正确答案是"${topic}"，用户猜的是"${userGuess}"。
-        Python 相似度得分：${score}（接近临界值）。
-        综合语义和文化含义，判断是否算"猜对"？
-        返回 JSON: { verdict: "correct"|"close"|"wrong", reason: string }
-```
-
-**组合判断逻辑**：
-
-```
-Python 得分 → "exact"  →  verdict = correct（跳过 LLM）
-Python 得分 → "far"    →  verdict = wrong（跳过 LLM）
-Python 得分 → "close"/"related" → 调用 LLM 做最终判断
-```
-
-这样大多数情况不消耗 LLM Token，只在模糊边界才调 LLM，兼顾速度和准确度。
-
-#### routeAfterJudge（条件边）
-
-```
-correct                 → revealNode
-close/wrong + attempts < maxAttempts → generateHintNode（循环）
-close/wrong + attempts >= maxAttempts → revealNode（强制揭晓）
-```
-
-#### revealNode（TypeScript）
-
-- 猜对时：生成庆祝文案，引用用户的猜测过程（"你从第X次提示里读出了..."）
-- 猜错（超次数）时：温柔揭晓，用一句诗意文案连接两个主题
-  - 例：答案是「公路」，你猜的是「夜晚」→ "其实夜晚和公路本来就在同一条路上"
-- 输出写入 `finalReveal`，同时写入 `Participant.guessCorrect`
-
-### 5.4 API 设计
-
-**启动猜谜图**
-
-```
-POST /api/rooms/[roomId]/guess-chat/start
-Body: { participantId, sessionToken }
-
-→ 初始化 GuessChatGraph，传入对方的 songName/artist/topic
-→ 图运行到第一个 interrupt（generateHintNode 完成后）
-→ 返回 { threadId, firstHint: string }
-```
-
-**提交猜测（resume 图）**
-
-```
-POST /api/rooms/[roomId]/guess-chat/guess
-Body: { participantId, sessionToken, guess: string, threadId: string }
-
-→ resume GuessChatGraph，注入 { guess }
-→ 图运行到下一个 interrupt 或 END
-→ 返回 {
-    reply: string,          AI 回复
-    verdict: string,        correct/close/wrong
-    resolved: boolean,      是否猜测结束
-    answer?: string,        resolved=true 时揭晓
-    finalReveal?: string    resolved=true 时的揭晓文案
+System Prompt：
+  你是音乐猜谜主持人，知道正确答案是「{topic}」。
+  玩家要根据歌曲《{song_name}》-{artist} 猜主题。
+  
+  [判断标准]
+  - correct：猜测词与答案语义相同、包含，或是答案的核心意象
+  - close：相关但不够准（给方向提示）
+  - wrong：方向完全偏了（给新角度提示）
+  
+  [输出格式] 严格 JSON：
+  {
+    "verdict": "correct|close|wrong",
+    "reply": "给用户看的回复（不超过50字，有温度感）"
   }
+  
+  开场时（attempts=0）verdict 固定为 "pending"，reply 为第一条线索。
+
+开场时的 User Prompt：
+  请根据《{song_name}》-{artist} 生成第一条隐晦线索（不说主题词）
+
+猜测时的 User Prompt：
+  用户猜了「{user_guess}」，这是第 {attempts} 次猜测，还剩 {remaining} 次机会。
+  请判断并生成回复。
 ```
 
-**放弃猜测**
+**关键设计**：开场和猜测合用同一节点，通过 `attempts==0` 区分，避免节点分裂。
+
+#### wait_for_guess_node 设计
+
+```python
+def wait_for_guess_node(state: GuessState):
+    # interrupt() 使图暂停，等待 resume 注入数据
+    user_input = interrupt({"attempts": state["attempts"], "max_attempts": state["max_attempts"]})
+    
+    return {
+        "user_guess": user_input["guess"],
+        "attempts": state["attempts"] + 1,
+        "messages": [{"role": "user", "content": user_input["guess"]}]
+    }
+```
+
+#### reveal_node 设计
+
+两种情况，各有文案风格：
 
 ```
+猜对时：
+  "就是这个！「{topic}」✨
+   你从《{song_name}》里读出了这种感觉"
+
+超次数时（未猜对）：
+  "答案是「{topic}」—— 
+   也许{topic}和你猜的{last_guess}，本来就是同一首歌里的不同面。"
+   （最后一句由 LLM 即兴生成，连接两个主题）
+```
+
+#### PostgresSaver 接入方式
+
+```python
+# music-tool-server/agent/checkpointer.py
+
+from langgraph.checkpoint.postgres import PostgresSaver
+import psycopg
+
+_checkpointer = None
+
+def get_checkpointer():
+    global _checkpointer
+    if _checkpointer is None:
+        conn = psycopg.connect(os.getenv("DATABASE_URL"))
+        _checkpointer = PostgresSaver(conn)
+        _checkpointer.setup()   # 幂等，建表不重复
+    return _checkpointer
+```
+
+> 与 TypeScript 的 `@langchain/langgraph-checkpoint-postgres` 使用同一张 `checkpoints` 表，但因为 thread_id 完全不同，互不干扰。
+
+### 4.3 FastAPI 路由设计
+
+```
+music-tool-server 新增三个端点：
+
+POST /guess-chat/start
+  Input:  { invite_code, participant_id, song_name, artist, topic }
+  Action: 初始化 GuessChatGraph，thread_id = f"{invite_code}_guess_{participant_id}"
+          运行到第一个 interrupt（即 judge_and_hint_node 生成开场线索后）
+  Output: { thread_id, first_hint: str }
+
+POST /guess-chat/guess
+  Input:  { thread_id, guess: str }
+  Action: resume 图，注入 { "guess": guess }
+          图运行到下一个 interrupt 或 END
+  Output: {
+    reply: str,          AI 回复（提示或庆祝）
+    verdict: str,        correct / close / wrong
+    attempts: int,       已猜次数
+    resolved: bool,      是否结束
+    answer: str | None,  resolved=true 时揭晓
+    final_reveal: str | None
+  }
+
+POST /guess-chat/reveal
+  Input:  { thread_id }
+  Action: 强制结束，绕过 interrupt 直接运行到 reveal_node → END
+  Output: { answer: str, final_reveal: str }
+```
+
+### 4.4 Next.js API 转发层
+
+Next.js 不直接跑 Python 图，只做**认证 + 转发**：
+
+```
+Next.js API Routes（新增）：
+
+POST /api/rooms/[roomId]/guess-chat/start
+  → 验证 participantId + sessionToken
+  → 从数据库取对方的 songName / artist / topic
+  → 转发到 Python: POST {MUSIC_TOOL_SERVER}/guess-chat/start
+  → 返回 firstHint 给前端
+
+POST /api/rooms/[roomId]/guess-chat/guess
+  → 验证身份
+  → 转发到 Python: POST {MUSIC_TOOL_SERVER}/guess-chat/guess
+  → 如果 resolved=true，把 guessCorrect 写入 Participant 表
+  → 返回结果给前端
+
 POST /api/rooms/[roomId]/guess-chat/reveal
-Body: { participantId, sessionToken, threadId }
-
-→ 直接跳到 revealNode，强制揭晓
-→ 返回 { answer: string, finalReveal: string }
+  → 验证身份
+  → 转发到 Python
+  → 写入 Participant.guessCorrect = false
+  → 返回答案
 ```
 
-### 5.5 前端 UI 设计
+### 4.5 前端 UI 设计
 
-**猜谜区域（替换原有简单输入框）**
+**猜谜区（替换现有简单输入框）**
 
 ```
 ┌──────────────────────────────────────────┐
 │  猜一猜 🎯                               │
 │  对方选了《追光者》- 岑宁儿               │
-│                                          │
+│  ──────────────────────────────────────  │
 │  ┌──────────────────────────────────┐   │
-│  │ 🤖 这首歌里有都市夜晚的气息，      │   │  ← AI 线索气泡
-│  │    副歌有一种追逐感...             │   │
+│  │ 🤖 这首歌里有很强的都市感，       │   │  ← AI 气泡
+│  │    副歌出现了一种追逐的意象...     │   │
 │  └──────────────────────────────────┘   │
 │                                          │
+│  你：「夜晚」                            │  ← 用户历史
+│                                          │
 │  ┌──────────────────────────────────┐   │
-│  │ 输入你的猜测...           [提交]  │   │
+│  │ 🤖 方向偏了，想想更具象的场景...  │   │  ← AI 气泡
 │  └──────────────────────────────────┘   │
-│  还剩 2 次机会   [放弃，直接看答案]     │
+│                                          │
+│  ┌─────────────────────┐  [提交]        │
+│  │ 输入你的猜测...      │               │
+│  └─────────────────────┘               │
+│  第 2 次 / 共 3 次      [直接看答案]    │
 └──────────────────────────────────────────┘
 ```
 
-**猜测进行中的对话流**
+**猜测结果揭晓**
 
 ```
-┌──────────────────────────────────────────┐
-│  🤖 ...（第一条线索）                    │
-│                           你：「失恋」   │
-│  🤖 方向偏了，这首歌其实更聚焦在           │
-│     一个具体的场景里                      │
-│                           你：「城市」   │
-│  🤖 🎉 就是这个！「城市」！              │
-│     你从第二条提示里读出了               │
-│     那种都市追逐的感觉                   │
-└──────────────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  🎉 就是这个！                       │  ← 猜对
+│  答案是「城市」                      │
+│  你从第二条提示里读出了那种          │
+│  都市追逐的感觉                      │
+└──────────────────────────────────────┘
+
+┌──────────────────────────────────────┐
+│  😊 答案是「城市」                   │  ← 超次数
+│  也许夜晚和城市，                    │
+│  本来就是同一条路上的两面。          │
+└──────────────────────────────────────┘
 ```
 
-**执行日志（AgentThinkingLog 里展示猜谜过程）**
+**AgentThinkingLog 中展示猜谜轨迹**
 
 ```
-🧠 生成开场线索    llm    850ms
-👤 等待猜测 #1    human   ——
-🔧 Python 语义判断 tool   45ms   → score: 0.21 (far)
-🧠 LLM 裁判       [跳过]
-🧠 生成提示 #2    llm    720ms
-👤 等待猜测 #2    human   ——
-🔧 Python 语义判断 tool   38ms   → score: 0.89 (exact)
-🧠 生成揭晓文案   llm    600ms
+🧠 生成开场线索           llm   820ms
+👤 等待猜测 #1            human  ——
+🧠 裁判 + 提示 #1         llm   680ms   verdict: wrong
+👤 等待猜测 #2            human  ——
+🧠 裁判 + 揭晓文案        llm   710ms   verdict: correct
 ```
 
-### 5.6 Python 微服务扩展（music-tool-server）
+---
 
-在现有 `music-tool-server` 新增模块：
-
-**新增文件结构**
+## 5. music-tool-server 文件结构变更
 
 ```
 music-tool-server/
-  services/
-    semantic.py       ← 新增：语义相似度计算
-  routers/
-    judge.py          ← 新增：/judge-similarity 端点
-  requirements.txt    ← 新增：sentence-transformers
+├── main.py                      ← 新增 guess-chat router
+├── requirements.txt             ← 新增 langgraph, langchain-openai, langgraph-checkpoint-postgres
+│
+├── agent/                       ← 新增目录
+│   ├── __init__.py
+│   ├── checkpointer.py          ← PostgresSaver 单例
+│   ├── guess_graph.py           ← GuessChatGraph 图定义
+│   └── prompts.py               ← Prompt 模板
+│
+├── routers/
+│   ├── search.py                ← 已有
+│   ├── verify.py                ← 已有
+│   └── guess_chat.py            ← 新增：/guess-chat/* 端点
+│
+└── services/
+    ├── netease.py               ← 已有
+    └── matcher.py               ← 已有
 ```
 
-**services/semantic.py 设计**
-
-```python
-# 使用多语言句向量模型
-# 模型选型：paraphrase-multilingual-MiniLM-L12-v2（轻量，支持中文）
-# 首次加载约 500ms，之后缓存
-
-def compute_similarity(guess: str, answer: str) -> dict:
-    # 1. 向量余弦相似度（主要判断）
-    # 2. rapidfuzz 字符串比率（兜底）
-    # 3. 返回 score + level
-    pass
-```
-
-**部署注意点**
-
-- `sentence-transformers` 首次加载模型耗时较长，需要在 Railway 上预热
-- 模型文件约 400MB，需要配置足够的内存（建议 512MB+）
-- 替代方案：如内存不足，可用 DeepSeek embedding API 替代本地模型
-
----
-
-## 6. 功能 D：结果页留言（已实现）
-
-### 设计原则
-
-- 在 AI 总结展示后，允许每位玩家对总结投票（很准/有点像/没准）+ 留言最多 100 字
-- 每人只能提交一次（防重复）
-- 留言写入 `GameReaction` 表
-- `accuracyVote` 在 `updateMemoryNode` 里写入 `PairMemory`，下局 AI 总结可引用
-
----
-
-## 7. 功能 E：首页欢迎回来（已实现）
-
-### 设计原则
-
-- 首页加载时查询 `/api/memory/user?userId=xxx`
-- 有游戏记录时展示蓝紫横幅：游戏次数、上次选歌、偏好风格
-- 自动回填昵称
-
----
-
-## 8. FullGameAnnotation 更新（V4 猜谜相关字段）
-
-主游戏图的 state 不直接承载猜谜对话（猜谜图独立），但需要记录猜谜结果供揭晓展示和记忆更新使用：
+### requirements.txt 新增
 
 ```
-新增字段：
-  guessResultA    { correct: boolean, attempts: number }
-  guessResultB    { correct: boolean, attempts: number }
-  
-  （猜谜图结束后，由 /guess-chat/guess 路由写入数据库 Participant 字段，
-   主游戏图通过 loadState 读取，不需要在主图 state 里传递）
+langgraph>=0.2.0
+langgraph-checkpoint-postgres>=2.0.0
+langchain-openai>=0.2.0
+psycopg[binary]>=3.1.0
 ```
 
 ---
 
-## 9. 完整系统架构图（V4）
+## 6. 实现顺序（下阶段）
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Next.js Frontend                            │
-│  首页  →  房间页  →  抽签  →  提交歌曲  →  结果页  →  猜谜      │
-└──────────────┬──────────────────────────────────────┬───────────┘
-               │ API Routes                           │ API Routes
-               ↓                                      ↓
-┌──────────────────────────┐          ┌───────────────────────────┐
-│   MainGameGraph          │          │   GuessChatGraph          │
-│   (LangGraph TS)         │          │   (LangGraph TS)          │
-│                          │          │                           │
-│  loadMemory              │          │  generateHint             │
-│  analyzeChat             │          │  ← interrupt →            │
-│  generateTopics          │          │  judgeGuess               │
-│  ← interrupt → draw      │          │  ← 条件循环 →             │
-│  ← interrupt → entries   │          │  reveal                   │
-│  generateSummary         │          │                           │
-│  updateMemory            │          │  thread: inviteCode       │
-│                          │          │         _guess_participantId│
-│  thread: inviteCode      │          └──────────────┬────────────┘
-└────────────┬─────────────┘                         │
-             │                                       │ 调用
-             ↓                                       ↓
-┌────────────────────────────────────────────────────────────────┐
-│                  PostgresSaver (Neon PostgreSQL)               │
-│  两张图共享同一个 checkpointer，thread 隔离互不干扰             │
-└────────────────────────────────────────────────────────────────┘
-             │ Tool Call                             │ HTTP
-             ↓                                       ↓
-┌────────────────────────────────────────────────────────────────┐
-│               Python FastAPI (music-tool-server)               │
-│                                                                │
-│  /search           网易云歌曲搜索                               │
-│  /verify           歌曲验证 + rapidfuzz 模糊匹配                │
-│  /judge-similarity 语义相似度（sentence-transformers）← V4新增  │
-└────────────────────────────────────────────────────────────────┘
-```
+✅ Phase 1-5（已完成）：记忆 / 思考直播 / 基础互猜 / 留言 / AI分离
 
----
+────────── 下阶段 ──────────
 
-## 10. 实现顺序
+Phase 6：Python GuessChatGraph 核心
+  目标：在 music-tool-server 里跑通整个猜谜图
+  步骤：
+    1. 安装新依赖（langgraph, langchain-openai, psycopg）
+    2. agent/checkpointer.py：Python PostgresSaver 单例
+    3. agent/guess_graph.py：
+       - GuessState TypedDict 定义
+       - judge_and_hint_node（LLM 一次调用）
+       - wait_for_guess_node（interrupt）
+       - reveal_node
+       - 条件路由函数
+       - 图编译 + checkpointer 接入
+    4. routers/guess_chat.py：
+       - POST /guess-chat/start
+       - POST /guess-chat/guess
+       - POST /guess-chat/reveal
+    5. main.py 注册新 router
+    6. 本地用 curl 测试完整 3 轮对话
 
-```
-✅ Phase 1（已完成）：数据库 + 记忆 CRUD
-   - UserMemory / PairMemory / GameReaction 表
-   - lib/memory/ CRUD 函数
+Phase 7：Next.js API 转发层
+  步骤：
+    1. app/api/rooms/[roomId]/guess-chat/start/route.ts
+    2. app/api/rooms/[roomId]/guess-chat/guess/route.ts
+    3. app/api/rooms/[roomId]/guess-chat/reveal/route.ts
+       （含身份验证 + 转发 + 写入 Participant.guessCorrect）
+    4. 删除旧的简单 guess API（/api/rooms/[roomId]/guess）
 
-✅ Phase 2（已完成）：MainGameGraph 接入记忆
-   - loadMemoryNode + updateMemoryNode
-   - FullGameAnnotation 新增记忆字段
+Phase 8：前端猜谜对话 UI
+  步骤：
+    1. 新建 components/GuessChatWidget.tsx
+       - 消息气泡列表（AI/用户区分）
+       - 输入框 + 提交
+       - 次数显示 + 放弃按钮
+       - 揭晓动画
+    2. 替换 room 页面中的简单猜测输入框
+    3. start API 在进入 result 阶段时自动调用（懒初始化）
+    4. 猜谜结束后触发对方卡片主题揭晓动画
 
-✅ Phase 3（已完成）：Agent 思考直播
-   - AgentThinkingLog 组件（轮询 + 逐条动画）
-
-✅ Phase 4（已完成，待优化）：基础互猜 + 留言
-   - 简单字符串猜测 + guess API + reaction API
-   - 对方主题猜测结果出来前隐藏
-
-✅ Phase 5（已完成）：AI 总结分离
-   - entries 快速返回 + /summarize 独立路由（maxDuration=60）
-
-────────── 下阶段开发 ──────────
-
-Phase 6：Python 语义裁判服务
-   - music-tool-server 新增 services/semantic.py
-   - sentence-transformers 中文模型集成
-   - /judge-similarity 端点
-   - Railway 部署 + 内存配置
-
-Phase 7：GuessChatGraph 独立图（TypeScript）
-   - lib/agent/guessChatGraph.ts
-   - GuessChatAnnotation 定义
-   - generateHintNode / judgeGuessNode / revealNode
-   - 条件路由（correct/close/wrong/maxAttempts）
-   - 接入 PostgresSaver（独立 thread）
-
-Phase 8：Guess Chat API 路由
-   - /api/rooms/[roomId]/guess-chat/start
-   - /api/rooms/[roomId]/guess-chat/guess
-   - /api/rooms/[roomId]/guess-chat/reveal
-
-Phase 9：前端猜谜对话 UI
-   - 对话气泡组件（AI 线索 + 用户猜测历史）
-   - 替换现有简单输入框
-   - 放弃按钮 + 次数显示
-   - 揭晓动画
-   - 猜谜过程写入 AgentThinkingLog
-
-Phase 10：端到端测试 + 记忆闭环验证
-   - 连续两局游戏，验证记忆注入是否生效
-   - 猜谜全流程测试（3轮猜测 + 放弃 + 正确）
-   - Python 语义判断准确率验证
+Phase 9：Railway 部署 + 端到端验证
+  步骤：
+    1. push music-tool-server，Railway 重新部署
+    2. 线上测试完整猜谜流程（3 轮 + 放弃 + 猜对）
+    3. 验证 PostgresSaver thread 不与主游戏图冲突
+    4. 验证 AgentThinkingLog 中猜谜日志是否正确追加
 ```
 
 ---
 
-## 11. 技术风险与备选方案
+## 7. 技术风险与对策
 
-| 风险 | 描述 | 备选方案 |
-|------|------|---------|
-| sentence-transformers 内存 | 模型约 400MB，Railway 免费版可能不够 | 用 DeepSeek Embedding API 替代本地模型 |
-| GuessChatGraph 超时 | 3 轮猜测 = 最多 6 次 LLM 调用 + 3 次 interrupt，每次 resume 是独立请求，不存在超时 | 架构天然规避此问题 |
-| Python 模型首次加载慢 | 冷启动约 5-10s | 在 start/guess-chat 路由加 Loading 态，或预热 |
-| 跨图状态同步 | 猜谜结果需要回写到数据库，主游戏图不直接感知 | API 层写入 Participant 字段，前端轮询读取 |
+| 风险 | 描述 | 对策 |
+|------|------|------|
+| LLM 输出不稳定 | judge_and_hint_node 要求严格 JSON | 用 `with_structured_output` 或 `response_format=json_object` 强制结构化 |
+| Python PostgresSaver 版本兼容 | Python 和 TS 两个 checkpointer 写同一个库 | 两边都用最新版，底层表 schema 相同，thread 隔离即可 |
+| music-tool-server 冷启动 | Railway 休眠后首次请求慢 | 前端进入结果页时提前 ping，或 Railway 配置 always-on |
+| 猜谜图的 thread 孤儿 | 玩家中途离开，thread 永远停在 interrupt | 无需清理（不影响功能），或加 TTL 定期清理 checkpoints 表 |
+| 中文 LLM 判断不稳定 | 某些近义主题被误判 | 在 prompt 里加例子（few-shot），或把 verdict 枚举精确到 5 档 |
 
 ---
 
-## 12. 简历叙事升级（V4 完成后）
+## 8. 完整系统简历叙事（V4 完成后）
 
-> **具备长期记忆的双人音乐 Agent**
+> **具备长期记忆与多轮交互的双人音乐 Agent**
 >
-> 基于 LangGraph HITL + PostgreSQL Checkpointer 构建。系统包含两张独立 LangGraph：主游戏图负责聊天分析、主题生成和音乐总结，猜谜图实现带条件循环的多轮 AI 主持对话（AI 同时扮演主持人和裁判，通过 Python sentence-transformers 语义相似度 + LLM 语义兜底完成猜测判断）。
+> 系统包含两张独立 LangGraph：
+> - **MainGameGraph（TypeScript）**：管理完整游戏生命周期，含记忆加载/写入节点、LLM 主题生成与总结、Tool Use 验证推荐歌曲，通过 PostgresSaver 实现 Serverless 跨请求状态持久化。
+> - **GuessChatGraph（Python）**：独立猜谜 Agent，带条件循环的多轮对话图。AI 同时扮演主持人（生成隐晦线索）和裁判（LLM 语义判断正确性），通过 interrupt/resume 实现 Human-in-the-loop，最多 3 轮后强制揭晓并生成诗意连接文案。
 >
-> Agent 跨会话追踪用户音乐偏好 DNA，积累双人关系记忆，动态调整主题生成策略和总结风格。集成 Python FastAPI 工具层实现 Tool Use + ReAct 推荐验证。思考过程全程可视化，每个节点的耗时和判断结果实时推送到前端。
+> 两张图共享同一个 PostgreSQL Checkpointer，thread 隔离，互不干扰。Python FastAPI 微服务（Railway）同时承担工具层（网易云搜索/验证）和猜谜 Agent，TypeScript 层（Vercel）负责主游戏与身份验证。
 >
-> 覆盖 Agent 核心能力：感知（聊天分析）、记忆（跨局 UserMemory/PairMemory）、规划（条件路由/循环图）、行动（Tool Use / Human-in-the-loop）、反思（语义裁判 + 动态提示生成）。
+> Agent 覆盖五大能力：**感知**（聊天分析）、**记忆**（跨局 UserMemory/PairMemory）、**规划**（条件路由/循环图）、**行动**（Tool Use / HITL）、**反思**（裁判节点语义判断 + 动态提示生成）。
 >
-> **技术栈**：Next.js / TypeScript · LangGraph · PostgreSQL (Neon) · Python FastAPI · sentence-transformers · DeepSeek LLM
+> **技术栈**：Next.js · TypeScript LangGraph · Python LangGraph · PostgreSQL (Neon) · Python FastAPI (Railway) · DeepSeek LLM
