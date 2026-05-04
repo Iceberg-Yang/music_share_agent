@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { saveSession } from "@/lib/utils";
+import { getUserId } from "@/lib/memory/userIdentity";
 
 type TopicMode = "default" | "ai_mood" | "ai_chat" | "ai_host";
 
@@ -16,6 +17,14 @@ interface ExtractedInfo {
   keywords: string[];
 }
 
+interface WelcomeInfo {
+  gamesPlayed: number;
+  nickname?: string;
+  lastSong?: string;
+  lastArtist?: string;
+  styles?: string[];
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [roomName, setRoomName] = useState("");
@@ -25,6 +34,9 @@ export default function HomePage() {
   const [chatText, setChatText] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // V4：欢迎回来
+  const [welcome, setWelcome] = useState<WelcomeInfo | null>(null);
 
   // 主持人对话状态
   const [hostMessages, setHostMessages] = useState<ChatMessage[]>([]);
@@ -38,6 +50,21 @@ export default function HomePage() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [hostMessages]);
+
+  // V4：加载欢迎回来数据
+  useEffect(() => {
+    const uid = getUserId();
+    if (!uid) return;
+    fetch(`/api/memory/user?userId=${encodeURIComponent(uid)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.gamesPlayed > 0) {
+          setWelcome(data);
+          if (data.nickname) setNickname(data.nickname);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // 开始主持人对话（发送第一条空消息触发 AI 打招呼）
   async function startHostChat() {
@@ -107,7 +134,10 @@ export default function HomePage() {
 
     setLoading(true);
     try {
-      const body: Record<string, unknown> = { roomName, nickname, topicMode, moodHint, chatText };
+      const body: Record<string, unknown> = {
+        roomName, nickname, topicMode, moodHint, chatText,
+        userId: getUserId(),
+      };
 
       // 如果有主持人对话，传入历史
       if (topicMode === "ai_host" && hostMessages.length > 0) {
@@ -140,6 +170,20 @@ export default function HomePage() {
   return (
     <main className="min-h-screen flex flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
+        {/* 欢迎回来横幅（V4）*/}
+        {welcome && welcome.gamesPlayed > 0 && (
+          <div className="mb-6 bg-indigo-950/50 border border-indigo-800/60 rounded-2xl px-4 py-3 text-sm">
+            <p className="text-indigo-300 font-medium mb-0.5">
+              欢迎回来{welcome.nickname ? `，${welcome.nickname}` : ""}！
+            </p>
+            <p className="text-gray-400 text-xs">
+              已玩 {welcome.gamesPlayed} 局
+              {welcome.lastSong ? `，上次选了《${welcome.lastSong}》` : ""}
+              {welcome.styles?.length ? `，偏好：${welcome.styles.slice(0, 2).join(" / ")}` : ""}
+            </p>
+          </div>
+        )}
+
         {/* 标题 */}
         <div className="text-center mb-10">
           <div className="text-5xl mb-4">🎵</div>

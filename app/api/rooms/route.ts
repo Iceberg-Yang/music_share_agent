@@ -15,6 +15,7 @@ export async function POST(req: NextRequest) {
       moodHint,
       chatText,
       hostConversationHistory,
+      userId,   // V4：设备 ID（可选）
     } = body;
 
     if (!roomName?.trim() || !nickname?.trim()) {
@@ -69,6 +70,9 @@ export async function POST(req: NextRequest) {
             moodHint: moodHint?.trim() ?? undefined,
             hostConversationSummary,
             roomName: roomName.trim(),
+            roomId: inviteCode,    // 用 inviteCode 作 roomId 占位（创建前）
+            userIdA: userId ?? "",
+            nicknameA: nickname.trim(),
             phase: "init",
           },
           threadConfig
@@ -111,6 +115,7 @@ export async function POST(req: NextRequest) {
           agentExecutionLog.length > 0
             ? JSON.stringify(agentExecutionLog)
             : null,
+        userIdA: userId ?? null,
         participants: {
           create: { nickname: nickname.trim() },
         },

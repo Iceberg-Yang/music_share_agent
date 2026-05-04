@@ -7,7 +7,7 @@ export async function POST(
 ) {
   try {
     const { roomId } = await params;
-    const { nickname } = await req.json();
+    const { nickname, userId } = await req.json();
 
     if (!nickname?.trim()) {
       return NextResponse.json({ error: "昵称不能为空" }, { status: 400 });
@@ -33,7 +33,10 @@ export async function POST(
 
     await prisma.room.update({
       where: { id: room.id },
-      data: { status: "ready" },
+      data: {
+        status: "ready",
+        userIdB: userId ?? null,
+      },
     });
 
     return NextResponse.json({

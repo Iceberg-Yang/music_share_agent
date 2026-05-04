@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { getSession, saveSession } from "@/lib/utils";
+import AgentThinkingLog from "@/components/AgentThinkingLog";
 
 interface Participant {
   id: string;
@@ -309,6 +310,17 @@ export default function RoomPage() {
   const [drawing, setDrawing] = useState(false);
   const [drawnTopic, setDrawnTopic] = useState<string | null>(null);
 
+  // V4：互猜状态
+  const [guessInput, setGuessInput] = useState("");
+  const [guessResult, setGuessResult] = useState<{ correct: boolean; answer: string } | null>(null);
+  const [guessLoading, setGuessLoading] = useState(false);
+
+  // V4：AI 总结留言/评分
+  const [reactionVote, setReactionVote] = useState<string | null>(null);
+  const [reactionComment, setReactionComment] = useState("");
+  const [reactionSubmitted, setReactionSubmitted] = useState(false);
+  const [reactionLoading, setReactionLoading] = useState(false);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── 歌曲搜索联想 ────────────────────────────
@@ -477,6 +489,54 @@ export default function RoomPage() {
     navigator.clipboard.writeText(base + `/join/${inviteCode}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  // V4：互猜提交
+  async function handleGuess() {
+    if (!guessInput.trim() || !me || !room) return;
+    const session = getSession(room.id);
+    if (!session) return;
+    setGuessLoading(true);
+    try {
+      const res = await fetch(`/api/rooms/${room.id}/guess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          participantId: me.id,
+          guess: guessInput.trim(),
+          sessionToken: session.sessionToken,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setGuessResult({ correct: data.guessCorrect, answer: data.answer });
+      }
+    } finally {
+      setGuessLoading(false);
+    }
+  }
+
+  // V4：留言/评分提交
+  async function handleReaction() {
+    if (!me || !room || reactionSubmitted) return;
+    const session = getSession(room.id);
+    if (!session) return;
+    setReactionLoading(true);
+    try {
+      await fetch(`/api/rooms/${room.id}/reaction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          participantId: me.id,
+          sessionToken: session.sessionToken,
+          accuracyVote: reactionVote,
+          comment: reactionComment.trim() || null,
+        }),
+      });
+      setReactionSubmitted(true);
+    } finally {
+      setReactionLoading(false);
+    }
   }
 
   if (loading) {
@@ -788,6 +848,94 @@ export default function RoomPage() {
               room.agentExecutionLog.length > 0 && (
                 <AgentExecutionLog logs={room.agentExecutionLog} />
               )}
+
+            {/* V4：Agent 思考直播（实时轮询） */}
+            <AgentThinkingLog roomId={inviteCode} phase={room.status} />
+
+            {/* V4：互猜环节 */}
+            {entries.length >= 2 && me && !guessResult && (
+              <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                <p className="text-sm text-gray-400 mb-1">猜一猜 🎯</p>
+                <p className="text-xs text-gray-600 mb-3">
+                  你知道对方抽到的是什么主题吗？
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition"
+                    placeholder="输入你的猜测…"
+                    value={guessInput}
+                    onChange={(e) => setGuessInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleGuess()}
+                    maxLength={20}
+                  />
+                  <button
+                    onClick={handleGuess}
+                    disabled={guessLoading || !guessInput.trim()}
+                    className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm font-medium transition"
+                  >
+                    {guessLoading ? "…" : "提交"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* V4：互猜结果 */}
+            {guessResult && (
+              <div className={`rounded-2xl p-5 border text-center ${guessResult.correct ? "bg-green-950/40 border-green-800" : "bg-gray-900 border-gray-700"}`}>
+                <div className="text-3xl mb-2">{guessResult.correct ? "🎉" : "😅"}</div>
+                <p className="font-semibold mb-1">
+                  {guessResult.correct ? "猜对了！" : "猜错了"}
+                </p>
+                <p className="text-sm text-gray-400">
+                  对方的主题是 <span className="text-indigo-300 font-medium">「{guessResult.answer}」</span>
+                </p>
+              </div>
+            )}
+
+            {/* V4：AI 总结留言 */}
+            {entries.length >= 2 && room.aiSummary && !reactionSubmitted && (
+              <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
+                <p className="text-sm text-gray-400 mb-3">对这次 AI 总结的感受</p>
+                <div className="flex gap-2 mb-3">
+                  {[
+                    { id: "accurate", label: "很准！", emoji: "✨" },
+                    { id: "close", label: "有点像", emoji: "🤔" },
+                    { id: "miss", label: "没准", emoji: "😂" },
+                  ].map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setReactionVote(v.id)}
+                      className={`flex-1 py-2 rounded-xl text-sm border transition ${
+                        reactionVote === v.id
+                          ? "bg-indigo-600 border-indigo-500 text-white"
+                          : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500"
+                      }`}
+                    >
+                      {v.emoji} {v.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition"
+                    placeholder="留言（可选，最多 100 字）"
+                    value={reactionComment}
+                    onChange={(e) => setReactionComment(e.target.value)}
+                    maxLength={100}
+                  />
+                  <button
+                    onClick={handleReaction}
+                    disabled={reactionLoading || (!reactionVote && !reactionComment.trim())}
+                    className="px-4 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-sm transition"
+                  >
+                    {reactionLoading ? "…" : "发送"}
+                  </button>
+                </div>
+              </div>
+            )}
+            {reactionSubmitted && (
+              <p className="text-center text-xs text-gray-600">已记录你的感受 ✓</p>
+            )}
 
             {/* 分享 */}
             <div className="flex gap-3">

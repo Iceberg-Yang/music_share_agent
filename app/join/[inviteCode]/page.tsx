@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { saveSession, getSession } from "@/lib/utils";
+import { getUserId } from "@/lib/memory/userIdentity";
 
 export default function JoinPage() {
   const { inviteCode } = useParams<{ inviteCode: string }>();
@@ -45,7 +46,7 @@ export default function JoinPage() {
       const res = await fetch(`/api/rooms/${inviteCode}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nickname }),
+        body: JSON.stringify({ nickname, userId: getUserId() }),
       });
       const data = await res.json();
       if (!res.ok) return setError(data.error || "加入失败");

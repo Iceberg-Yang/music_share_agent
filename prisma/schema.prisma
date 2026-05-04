@@ -22,14 +22,20 @@ model Room {
   expiresAt    DateTime
 
   // V2 Agent 字段
-  agentPhase              String?  // Agent 工作流当前阶段
-  agentPersonalityProfiles String? // JSON：双人性格档案
-  agentRelationship       String?  // JSON：关系分析
-  agentNextSong           String?  // JSON：下一首推荐
-  agentExecutionLog       String?  // JSON：Agent 执行日志数组
+  agentPhase               String?  // Agent 工作流当前阶段
+  agentPersonalityProfiles String?  // JSON：双人性格档案
+  agentRelationship        String?  // JSON：关系分析
+  agentNextSong            String?  // JSON：下一首推荐
+  agentExecutionLog        String?  // JSON：Agent 执行日志数组
+
+  // V4 记忆系统字段
+  userIdA      String?  // 创建者设备 ID
+  userIdB      String?  // 加入者设备 ID
+  pairId       String?  // SHA256(userIdA_userIdB)
 
   participants Participant[]
   entries      MusicEntry[]
+  reactions    GameReaction[]
 }
 
 model Participant {
@@ -40,8 +46,13 @@ model Participant {
   drawnTopic   String?
   joinedAt     DateTime    @default(now())
 
+  // V4 互猜字段
+  guess        String?   // 猜测对方主题
+  guessCorrect Boolean?  // 是否猜对
+
   room         Room        @relation(fields: [roomId], references: [id])
   entry        MusicEntry?
+  reactions    GameReaction[]
 }
 
 model MusicEntry {
@@ -54,6 +65,50 @@ model MusicEntry {
   musicUrl      String?
   reason        String?
   createdAt     DateTime    @default(now())
+
+  room          Room        @relation(fields: [roomId], references: [id])
+  participant   Participant @relation(fields: [participantId], references: [id])
+}
+
+// V4 新增：用户音乐记忆
+model UserMemory {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+
+  gamesPlayed Int      @default(0)
+  nickname    String?
+
+  musicDNA    String?  // JSON: { styles, keywords, songs[] }
+  usedTopics  String?  // JSON: string[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// V4 新增：双人关系记忆
+model PairMemory {
+  id             String   @id @default(cuid())
+  pairId         String   @unique  // sorted(userIdA, userIdB) 拼接后 hash
+
+  gamesPlayed    Int      @default(0)
+  gameHistory    String?  // JSON: GameSnapshot[]
+  relationTags   String?  // JSON: string[]
+  cumulativeMood String?  // JSON: string[]
+
+  updatedAt      DateTime @updatedAt
+}
+
+// V4 新增：结果页留言与投票
+model GameReaction {
+  id            String   @id @default(cuid())
+  roomId        String
+  participantId String
+  userId        String?
+
+  accuracyVote  String?  // "accurate" | "close" | "miss"
+  comment       String?  @db.VarChar(100)
+
+  createdAt     DateTime @default(now())
 
   room          Room        @relation(fields: [roomId], references: [id])
   participant   Participant @relation(fields: [participantId], references: [id])

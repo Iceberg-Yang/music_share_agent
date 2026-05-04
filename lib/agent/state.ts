@@ -18,7 +18,7 @@ export interface ExecutionLogEntry {
   startAt: string;
   endAt: string;
   durationMs: number;
-  type: "llm" | "human" | "route";
+  type: "llm" | "human" | "route" | "tool";
   summary: string;
   thinking?: string;
 }
