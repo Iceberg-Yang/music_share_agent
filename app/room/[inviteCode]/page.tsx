@@ -472,7 +472,8 @@ export default function RoomPage() {
   }
 
   function copyLink() {
-    navigator.clipboard.writeText(window.location.origin + `/join/${inviteCode}`);
+    const base = process.env.NEXT_PUBLIC_APP_URL || window.location.origin;
+    navigator.clipboard.writeText(base + `/join/${inviteCode}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
