@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { runSummaryGraph } from "@/lib/agent/graph";
-import type { ExecutionLogEntry, PersonalityProfile, RelationshipAnalysis } from "@/lib/agent/state";
+import { Command } from "@langchain/langgraph";
+import { getCompiledGraph } from "@/lib/agent/fullGraph";
+import type { ExecutionLogEntry, PersonalityProfile, ParticipantForSummary, NextSongRecommendation } from "@/lib/agent/state";
 
 export async function POST(
   req: NextRequest,
@@ -51,20 +52,15 @@ export async function POST(
     const allParticipants = await prisma.participant.findMany({ where: { roomId } });
 
     if (allEntries.length >= 2 && allParticipants.length === 2) {
-      // 两人都提交，启动 LangGraph 总结子图
       const room = await prisma.room.findUnique({ where: { id: roomId } });
       if (!room) return NextResponse.json({ error: "房间不存在" }, { status: 404 });
 
-      // 解析性格档案和关系分析
       const personalityProfiles: PersonalityProfile[] = room.agentPersonalityProfiles
         ? JSON.parse(room.agentPersonalityProfiles)
         : [];
-      const relationshipAnalysis: RelationshipAnalysis | undefined = room.agentRelationship
-        ? JSON.parse(room.agentRelationship)
-        : undefined;
 
-      // 构建总结图输入
-      const summaryParticipants = allParticipants.map((p, idx) => {
+      // 构建完整参与者数据（含歌曲 entry）
+      const participantsForGraph: ParticipantForSummary[] = allParticipants.map((p, idx) => {
         const e = allEntries.find((en) => en.participantId === p.id);
         const profile = personalityProfiles[idx];
         return {
@@ -81,18 +77,7 @@ export async function POST(
         };
       });
 
-      // 运行 LangGraph 总结子图
-      const summaryResult = await runSummaryGraph({
-        roomName: room.name,
-        participants: summaryParticipants,
-        relationshipAnalysis,
-      });
-
-      // 合并执行日志
-      const existingLog: ExecutionLogEntry[] = room.agentExecutionLog
-        ? JSON.parse(room.agentExecutionLog)
-        : [];
-
+      // 提交日志
       const submitLogs: ExecutionLogEntry[] = allParticipants.map((p) => {
         const e = allEntries.find((en) => en.participantId === p.id);
         return {
@@ -104,6 +89,41 @@ export async function POST(
           summary: `${p.nickname} 提交了《${e?.songName}》- ${e?.artist}`,
         };
       });
+
+      // ── 真正的 Human-in-the-loop：resume 到 generateSummaryNode ──
+      // thread_id = inviteCode，与创建时保持一致
+      let summaryResult: {
+        summary?: string;
+        tags?: string[];
+        nextSongRecommendation?: NextSongRecommendation;
+        executionLog?: ExecutionLogEntry[];
+      } = {};
+
+      try {
+        const graph = await getCompiledGraph();
+        // resume 图：传入完整参与者数据（含歌曲），图继续运行到 generateSummaryNode → END
+        summaryResult = await graph.invoke(
+          new Command({ resume: { participants: participantsForGraph } }),
+          { configurable: { thread_id: room.inviteCode } }
+        );
+      } catch (graphErr) {
+        console.error("[FullGraph] entries resume 失败:", graphErr);
+        // 降级：直接用 V2 方式调用总结（保留业务连续性）
+        const { runSummaryGraph } = await import("@/lib/agent/graph");
+        const fallbackResult = await runSummaryGraph({
+          roomName: room.name,
+          participants: participantsForGraph,
+          relationshipAnalysis: room.agentRelationship
+            ? JSON.parse(room.agentRelationship)
+            : undefined,
+        });
+        summaryResult = fallbackResult;
+      }
+
+      // 合并执行日志
+      const existingLog: ExecutionLogEntry[] = room.agentExecutionLog
+        ? JSON.parse(room.agentExecutionLog)
+        : [];
 
       const newLog: ExecutionLogEntry[] = [
         ...existingLog,
@@ -121,7 +141,7 @@ export async function POST(
           agentNextSong: summaryResult.nextSongRecommendation
             ? JSON.stringify(summaryResult.nextSongRecommendation)
             : null,
-          agentExecutionLog: JSON.stringify(newLog.slice(-20)), // 最多保留 20 条
+          agentExecutionLog: JSON.stringify(newLog.slice(-20)),
         },
       });
     }

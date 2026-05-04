@@ -38,6 +38,17 @@ interface NextSongRecommendation {
   songName: string;
   artist: string;
   reason: string;
+  neteaseUrl?: string;
+  coverUrl?: string;
+}
+
+interface SongSuggestion {
+  id: number;
+  name: string;
+  artist: string;
+  album: string;
+  url: string;
+  cover?: string;
 }
 
 interface ExecutionLogEntry {
@@ -144,18 +155,42 @@ function NextSongCard({ rec }: { rec: NextSongRecommendation }) {
     <div className="bg-gray-900 rounded-2xl p-5 border border-gray-800">
       <p className="text-xs text-gray-500 mb-3">🎵 如果还想听一首</p>
       <div className="flex items-start gap-3">
-        <div className="w-10 h-10 rounded-xl bg-indigo-600/30 flex items-center justify-center text-lg flex-shrink-0">
-          ♫
-        </div>
-        <div>
+        {rec.coverUrl ? (
+          <img
+            src={rec.coverUrl}
+            alt={rec.songName}
+            className="w-12 h-12 rounded-xl object-cover flex-shrink-0"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+          />
+        ) : (
+          <div className="w-10 h-10 rounded-xl bg-indigo-600/30 flex items-center justify-center text-lg flex-shrink-0">
+            ♫
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
           <p className="text-base font-bold text-white">《{rec.songName}》</p>
           <p className="text-sm text-gray-400">{rec.artist}</p>
           {rec.reason && (
             <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">{rec.reason}</p>
           )}
+          {rec.neteaseUrl && (
+            <a
+              href={rec.neteaseUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 mt-2 transition"
+            >
+              <span>在网易云听</span>
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            </a>
+          )}
         </div>
       </div>
-      <p className="text-xs text-gray-700 mt-3">* AI 推荐，请自行确认歌曲是否存在</p>
+      {!rec.neteaseUrl && (
+        <p className="text-xs text-gray-700 mt-3">* AI 推荐，网易云验证中</p>
+      )}
     </div>
   );
 }
@@ -263,10 +298,51 @@ export default function RoomPage() {
   const [reason, setReason] = useState("");
   const [submitError, setSubmitError] = useState("");
 
+  // 歌曲搜索联想
+  const [suggestions, setSuggestions] = useState<SongSuggestion[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suggestionRef = useRef<HTMLDivElement>(null);
+
   const [drawing, setDrawing] = useState(false);
   const [drawnTopic, setDrawnTopic] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── 歌曲搜索联想 ────────────────────────────
+  const handleSongNameChange = (value: string) => {
+    setSongName(value);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!value.trim()) { setSuggestions([]); setShowSuggestions(false); return; }
+
+    searchTimer.current = setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const res = await fetch(`/api/music/search?q=${encodeURIComponent(value)}&limit=5`);
+        const data = await res.json();
+        if (data.songs?.length > 0) {
+          setSuggestions(data.songs);
+          setShowSuggestions(true);
+        } else {
+          setSuggestions([]);
+          setShowSuggestions(false);
+        }
+      } catch {
+        setSuggestions([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 400); // 400ms 防抖
+  };
+
+  const handleSelectSuggestion = (song: SongSuggestion) => {
+    setSongName(song.name);
+    setArtist(song.artist);
+    if (!musicUrl) setMusicUrl(song.url); // 只在用户没填链接时自动填
+    setSuggestions([]);
+    setShowSuggestions(false);
+  };
 
   const fetchRoom = useCallback(async () => {
     try {
@@ -526,14 +602,61 @@ export default function RoomPage() {
             </div>
 
             <div className="bg-gray-900 rounded-2xl p-6 space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">歌名 *</label>
+              {/* 歌名（带搜索联想） */}
+              <div className="relative">
+                <label className="block text-sm text-gray-400 mb-1">
+                  歌名 *
+                  {searchLoading && (
+                    <span className="ml-2 text-xs text-indigo-400 animate-pulse">搜索中...</span>
+                  )}
+                </label>
                 <input
                   className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition"
-                  placeholder="叫什么名字"
+                  placeholder="叫什么名字（输入可搜索网易云）"
                   value={songName}
-                  onChange={(e) => setSongName(e.target.value)}
+                  onChange={(e) => handleSongNameChange(e.target.value)}
+                  onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                  autoComplete="off"
                 />
+                {/* 搜索建议下拉 */}
+                {showSuggestions && suggestions.length > 0 && (
+                  <div
+                    ref={suggestionRef}
+                    className="absolute top-full left-0 right-0 z-50 mt-1 bg-gray-800 border border-gray-700 rounded-xl overflow-hidden shadow-xl"
+                  >
+                    {suggestions.map((song) => (
+                      <button
+                        key={song.id}
+                        type="button"
+                        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-700 transition border-b border-gray-700 last:border-b-0"
+                        onMouseDown={() => handleSelectSuggestion(song)}
+                      >
+                        {song.cover && (
+                          <img
+                            src={song.cover}
+                            alt={song.name}
+                            className="w-9 h-9 rounded-lg object-cover flex-shrink-0"
+                          />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-white font-medium truncate">《{song.name}》</p>
+                          <p className="text-xs text-gray-400 truncate">{song.artist} · {song.album}</p>
+                        </div>
+                        <a
+                          href={song.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-xs text-indigo-400 hover:text-indigo-300 flex-shrink-0"
+                          title="在网易云打开"
+                        >
+                          试听
+                        </a>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
               <div>
                 <label className="block text-sm text-gray-400 mb-1">歌手 *</label>
@@ -548,7 +671,7 @@ export default function RoomPage() {
                 <label className="block text-sm text-gray-400 mb-1">链接 <span className="text-gray-600">可选</span></label>
                 <input
                   className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 transition"
-                  placeholder="网易云 / QQ 音乐链接"
+                  placeholder="选择网易云歌曲后自动填入"
                   value={musicUrl}
                   onChange={(e) => setMusicUrl(e.target.value)}
                 />

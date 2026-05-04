@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { runSummaryGraph } from "@/lib/agent/graph";
-import type { ExecutionLogEntry } from "@/lib/agent/state";
+import { Command } from "@langchain/langgraph";
+import { getCompiledGraph } from "@/lib/agent/fullGraph";
+import type { ExecutionLogEntry, ParticipantForSummary, PersonalityProfile } from "@/lib/agent/state";
 
 type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
@@ -65,19 +66,45 @@ export async function POST(
     const allDrawn = allParticipants.every((p) => p.drawnTopic);
 
     if (allDrawn) {
-      // 追加 human 日志
       const existingLog: ExecutionLogEntry[] = room.agentExecutionLog
         ? JSON.parse(room.agentExecutionLog)
         : [];
 
       const drawLog: ExecutionLogEntry[] = allParticipants.map((p) => ({
-        node: "waitForDrawNode",
+        node: "waitForDrawsNode",
         startAt: new Date().toISOString(),
         endAt: new Date().toISOString(),
         durationMs: 0,
         type: "human" as const,
         summary: `${p.nickname} 抽到主题「${p.drawnTopic}」`,
       }));
+
+      // ── 真正的 Human-in-the-loop：resume 到 waitForEntriesNode ──
+      // 用 inviteCode 作为 thread_id，与创建时保持一致
+      const agentPersonalityProfiles: PersonalityProfile[] = room.agentPersonalityProfiles
+        ? JSON.parse(room.agentPersonalityProfiles)
+        : [];
+
+      const participantsForGraph: ParticipantForSummary[] = allParticipants.map((p, i) => ({
+        id: p.id,
+        nickname: p.nickname,
+        drawnTopic: p.drawnTopic ?? "",
+        traits: agentPersonalityProfiles[i]?.traits ?? [],
+        musicStyle: agentPersonalityProfiles[i]?.musicStyle ?? "",
+        entry: { songName: "", artist: "" }, // entry 在提交时填入
+      }));
+
+      try {
+        const graph = await getCompiledGraph();
+        // resume 图：传入双方抽签数据，图继续运行到 waitForEntriesNode 再次 interrupt
+        await graph.invoke(
+          new Command({ resume: { participants: participantsForGraph } }),
+          { configurable: { thread_id: room.inviteCode } }
+        );
+      } catch (graphErr) {
+        // resume 失败不影响抽签结果，仅打日志
+        console.error("[FullGraph] draw resume 失败:", graphErr);
+      }
 
       await prisma.room.update({
         where: { id: roomId },

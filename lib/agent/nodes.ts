@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { AnalysisAnnotation, SummaryAnnotation, ExecutionLogEntry } from "./state";
 import { DEFAULT_TOPICS } from "@/lib/llm";
+import { searchNeteaseTool, type VerifyResult } from "./tools";
 
 const client = new OpenAI({
   apiKey: process.env.LLM_API_KEY || "placeholder",
@@ -272,7 +273,7 @@ ${contextParts.join("\n")}
 }
 
 // ──────────────────────────────────────────────
-// Node 3：generateSummaryNode（总结 + 下一首推荐）
+// Node 3：generateSummaryNode（ReAct 模式：总结 + Tool Use 验证推荐歌曲）
 // ──────────────────────────────────────────────
 
 export async function generateSummaryNode(
@@ -285,13 +286,7 @@ export async function generateSummaryNode(
       summary: "这场音乐局留下了两首各自的回响。",
       tags: [],
       executionLog: [
-        makeLogEntry(
-          "generateSummaryNode",
-          "route",
-          startAt,
-          new Date(),
-          "参与者不足，跳过生成"
-        ),
+        makeLogEntry("generateSummaryNode", "route", startAt, new Date(), "参与者不足，跳过生成"),
       ],
     };
   }
@@ -301,10 +296,10 @@ export async function generateSummaryNode(
 
   const aDesc = `${a.nickname}${a.traits.length ? `（${a.traits.join("、")}）` : ""}，抽到主题「${a.drawnTopic}」，分享了《${a.entry.songName}》- ${a.entry.artist}${a.entry.reason ? `，理由：${a.entry.reason}` : ""}`;
   const bDesc = `${b.nickname}${b.traits.length ? `（${b.traits.join("、")}）` : ""}，抽到主题「${b.drawnTopic}」，分享了《${b.entry.songName}》- ${b.entry.artist}${b.entry.reason ? `，理由：${b.entry.reason}` : ""}`;
-
   const relDesc = rel ? `\n两人关系：${rel.type}，${rel.tone}` : "";
 
-  const prompt = `你是一个音乐局的旁观者，同时也是一个懂音乐的策展人。
+  // ── Step 1：先生成总结和推荐意向 ──────────────────
+  const summaryPrompt = `你是一个音乐局的旁观者，同时也是一个懂音乐的策展人。
 根据以下信息写总结和推荐。
 
 音乐局名称：${state.roomName}${relDesc}
@@ -316,51 +311,111 @@ ${bDesc}
   "summary": "50-80字总结，第三人称旁观者视角，用意象不用评价",
   "tags": ["标签1", "标签2", "标签3"],
   "nextSongRecommendation": {
-    "songName": "歌曲名",
+    "songName": "歌曲名（推荐一首真实存在的中文歌曲）",
     "artist": "歌手名",
     "reason": "30字以内，语气像朋友推荐"
   }
 }
 
-总结规范：
-- 不得出现"默契""好听""非常"等套话
-- 用场景感、画面感的意象，例如夜路、海边、窗帘、月台
-- 保留一些模糊感，不过度解释
-推荐规范：
-- 推荐一首真实存在的歌曲
-- 风格介于两人选择之间
-- 理由要有温度，不要像算法推荐`;
+总结规范：不得出现"默契""好听""非常"等套话，用意象，保留模糊感。
+推荐规范：风格介于两人选择之间，选知名度较高、确定存在的歌曲。`;
 
   try {
-    const response = await client.chat.completions.create({
+    const summaryResponse = await client.chat.completions.create({
       model: MODEL,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: summaryPrompt }],
       response_format: { type: "json_object" },
       temperature: 0.7,
     });
 
-    const raw = response.choices[0]?.message?.content || "{}";
+    const raw = summaryResponse.choices[0]?.message?.content || "{}";
     const parsed = JSON.parse(raw);
-    const endAt = new Date();
+    const summaryEndAt = new Date();
 
     const rec = parsed.nextSongRecommendation;
+
+    // ── Step 2：ReAct Tool Use —— 验证推荐歌曲是否真实存在 ──
+    let verifyResult: VerifyResult | null = null;
+    let toolCallLogs: ExecutionLogEntry[] = [];
+    let verifiedRec = rec;
+
+    if (rec?.songName && rec?.artist) {
+      // 最多重试 2 次
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const toolStart = new Date();
+        verifyResult = await searchNeteaseTool.invoke({
+          songName: verifiedRec.songName,
+          artist: verifiedRec.artist,
+        });
+        const toolEnd = new Date();
+
+        toolCallLogs.push(
+          makeLogEntry(
+            "searchNeteaseTool",
+            "llm",
+            toolStart,
+            toolEnd,
+            verifyResult.exists
+              ? `验证成功：《${verifyResult.song?.name}》- ${verifyResult.song?.artist}，置信度 ${(verifyResult.confidence * 100).toFixed(0)}%`
+              : `验证失败（置信度 ${(verifyResult.confidence * 100).toFixed(0)}%）：${verifyResult.message}`,
+          )
+        );
+
+        if (verifyResult.exists) break;
+
+        // 验证失败：让 LLM 换一首
+        if (attempt === 0) {
+          const retryResponse = await client.chat.completions.create({
+            model: MODEL,
+            messages: [
+              { role: "user", content: summaryPrompt },
+              { role: "assistant", content: raw },
+              {
+                role: "user",
+                content: `你推荐的《${verifiedRec.songName}》- ${verifiedRec.artist} 在网易云音乐上找不到，请换一首知名度更高、确认存在的歌曲。只需返回 nextSongRecommendation 字段的 JSON。`,
+              },
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.8,
+          });
+          const retryParsed = JSON.parse(
+            retryResponse.choices[0]?.message?.content || "{}"
+          );
+          verifiedRec = retryParsed.nextSongRecommendation || verifiedRec;
+        }
+      }
+    }
+
+    const endAt = new Date();
+    const toolSummary = toolCallLogs.length > 0
+      ? `；调用 search_netease_music 工具验证推荐歌曲`
+      : "";
+
+    // 用验证后的推荐（verifiedRec）及 verifyResult 补充 url 和 cover
+    const finalRec = verifiedRec?.songName && verifiedRec?.artist
+      ? {
+          songName: verifyResult?.song?.name || verifiedRec.songName,
+          artist: verifyResult?.song?.artist || verifiedRec.artist,
+          reason: verifiedRec.reason || "",
+          neteaseUrl: verifyResult?.song?.url,
+          coverUrl: verifyResult?.song?.cover,
+        }
+      : undefined;
 
     return {
       summary: parsed.summary || "这场音乐局留下了两首各自的回响。",
       tags: Array.isArray(parsed.tags) ? parsed.tags : [],
-      nextSongRecommendation:
-        rec?.songName && rec?.artist
-          ? { songName: rec.songName, artist: rec.artist, reason: rec.reason || "" }
-          : undefined,
+      nextSongRecommendation: finalRec,
       executionLog: [
         makeLogEntry(
           "generateSummaryNode",
           "llm",
           startAt,
-          endAt,
-          `生成氛围总结${rec?.songName ? " + 推荐《" + rec.songName + "》" : ""}`,
+          summaryEndAt,
+          `生成氛围总结${finalRec ? `，推荐《${finalRec.songName}》${toolSummary}` : ""}`,
           raw
         ),
+        ...toolCallLogs,
       ],
     };
   } catch {

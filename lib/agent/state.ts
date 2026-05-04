@@ -27,6 +27,8 @@ export interface NextSongRecommendation {
   songName: string;
   artist: string;
   reason: string;
+  neteaseUrl?: string;  // 验证通过后由 searchNeteaseTool 填充
+  coverUrl?: string;    // 专辑封面
 }
 
 // 完整的业务状态类型，用于数据库序列化和 API 响应
