@@ -30,8 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files（密钥勿入库）；*.example 模板可提交
 .env*
+!.env.example
+!**/.env.example
 
 # prisma local db
 prisma/dev.db
@@ -51,4 +53,3 @@ app/.next
 __pycache__/
 *.pyc
 *.pyo
-.env
