@@ -631,18 +631,10 @@ export default function RoomPage() {
                       <button
                         key={song.id}
                         type="button"
-                        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-700 transition border-b border-gray-700 last:border-b-0"
+                        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-700 transition border-b border-gray-700 last:border-b-0"
                         onMouseDown={() => handleSelectSuggestion(song)}
                       >
-                        {song.cover && (
-                          <img
-                            src={song.cover}
-                            alt={song.name}
-                            className="w-9 h-9 rounded-lg object-cover flex-shrink-0"
-                            referrerPolicy="no-referrer"
-                          />
-                        )}
-                        <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-0 pr-3">
                           <p className="text-sm text-white font-medium truncate">《{song.name}》</p>
                           <p className="text-xs text-gray-400 truncate">{song.artist} · {song.album}</p>
                         </div>
