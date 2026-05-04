@@ -5,7 +5,7 @@ const client = new OpenAI({
   apiKey: process.env.LLM_API_KEY || "placeholder",
   baseURL: process.env.LLM_BASE_URL || "https://api.deepseek.com",
 });
-const MODEL = process.env.LLM_MODEL || "deepseek-chat";
+const MODEL = process.env.LLM_MODEL || "deepseek-v4-flash";
 
 const SYSTEM_PROMPT = `你是一个音乐抽签活动的 AI 主持人，性格温和、有点文艺，说话简洁不罗嗦。
 你需要通过最多 3 轮对话了解用户这次音乐分享的背景，包括：

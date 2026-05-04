@@ -89,7 +89,7 @@ def _default_state() -> GuessState:
 
 def _get_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=os.getenv("LLM_MODEL", "deepseek-chat"),
+        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
         api_key=os.getenv("LLM_API_KEY", ""),
         base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com"),
         temperature=0.7,

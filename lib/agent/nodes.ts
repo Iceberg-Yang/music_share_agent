@@ -7,7 +7,7 @@ const client = new OpenAI({
   apiKey: process.env.LLM_API_KEY || "placeholder",
   baseURL: process.env.LLM_BASE_URL || "https://api.deepseek.com",
 });
-const MODEL = process.env.LLM_MODEL || "deepseek-chat";
+const MODEL = process.env.LLM_MODEL || "deepseek-v4-flash";
 
 // ──────────────────────────────────────────────
 // 工具：计时 + 构建日志

@@ -5,7 +5,7 @@ const client = new OpenAI({
   baseURL: process.env.LLM_BASE_URL || "https://api.deepseek.com",
 });
 
-const MODEL = process.env.LLM_MODEL || "deepseek-chat";
+const MODEL = process.env.LLM_MODEL || "deepseek-v4-flash";
 
 export interface ChatAnalysisResult {
   mood: string;
